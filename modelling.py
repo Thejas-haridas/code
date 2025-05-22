@@ -2,6 +2,16 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import logging
 
+# Check GPU availability and set device
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+    print(f"GPU detected: {torch.cuda.get_device_name(0)}")
+    print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    torch.cuda.empty_cache()  # Clear GPU cache
+else:
+    device = torch.device("cpu")
+    print("No GPU detected, using CPU")
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -82,7 +92,7 @@ class SQLGenerator:
         self.load_model()
     
     def load_model(self):
-        """Load the SQLCoder model and tokenizer"""
+        """Load the SQLCoder model and tokenizer with GPU optimization"""
         try:
             logger.info("Loading Defog SQLCoder model...")
             model_name = "defog/llama-3-sqlcoder-8b"
@@ -90,19 +100,48 @@ class SQLGenerator:
             # Load tokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
             
-            # Load model with 8-bit quantization for memory efficiency
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                # torch_dtype=torch.float16,
-                load_in_8bit=True,
-                device_map="auto",
-                use_cache=True,
-            )
+            # Set optimal settings based on available hardware
+            if torch.cuda.is_available():
+                logger.info("Loading model with GPU optimization...")
+                # For GPU with sufficient memory
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float16,  # Use FP16 for GPU
+                    load_in_8bit=True,
+                    device_map="auto",
+                    use_cache=True,
+                    low_cpu_mem_usage=True,
+                )
+            else:
+                logger.info("Loading model for CPU...")
+                # For CPU fallback
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float32,  # Use FP32 for CPU
+                    device_map="cpu",
+                    use_cache=True,
+                    low_cpu_mem_usage=True,
+                )
             
             # Set pad token if not present
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
+            
+            # Enable optimizations
+            if torch.cuda.is_available():
+                # Enable GPU optimizations
+                torch.backends.cudnn.benchmark = True
+                torch.backends.cudnn.enabled = True
+                
+                # Clear GPU cache
+                torch.cuda.empty_cache()
+                
+                # Get memory info
+                memory_allocated = torch.cuda.memory_allocated() / 1024**3
+                memory_reserved = torch.cuda.memory_reserved() / 1024**3
+                logger.info(f"GPU Memory - Allocated: {memory_allocated:.2f} GB, Reserved: {memory_reserved:.2f} GB")
                 
             logger.info("Model loaded successfully!")
             logger.info(f"Model device: {next(self.model.parameters()).device}")
@@ -131,6 +170,9 @@ Generate a SQL query to answer this question: `{question}`
     def extract_sql_from_response(self, response: str) -> str:
         """Extract SQL query from model response"""
         
+        # Clean up the response first
+        response = response.strip()
+        
         # Look for SQL code blocks
         if "```sql" in response:
             sql_start = response.find("```sql") + 6
@@ -138,53 +180,133 @@ Generate a SQL query to answer this question: `{question}`
             if sql_end != -1:
                 return response[sql_start:sql_end].strip()
         
-        # Look for SELECT statements
+        # Look for SELECT statements and stop at common endpoints
         if "SELECT" in response.upper():
             lines = response.split('\n')
             sql_lines = []
             capturing = False
             
             for line in lines:
+                line = line.strip()
+                
+                # Start capturing when we see SELECT
                 if "SELECT" in line.upper():
                     capturing = True
+                
                 if capturing:
+                    # Stop if we hit common stop patterns
+                    if any(stop_word in line.lower() for stop_word in [
+                        'assistant', 'i am a', 'here is', 'summary', 'experience',
+                        'looking for', 'software developer', 'job search'
+                    ]):
+                        break
+                    
                     sql_lines.append(line)
-                    if line.strip().endswith(';'):
+                    
+                    # Stop at semicolon
+                    if line.endswith(';'):
                         break
             
-            return '\n'.join(sql_lines).strip()
+            sql_result = '\n'.join(sql_lines).strip()
+            
+            # Additional cleanup - remove any trailing non-SQL content
+            sql_result = self.clean_trailing_content(sql_result)
+            
+            return sql_result
         
-        # Return the response as-is if no clear SQL block found
-        return response.strip()
+        # Return cleaned response
+        return self.clean_trailing_content(response)
+    
+    def clean_trailing_content(self, text: str) -> str:
+        """Remove unwanted trailing content from SQL"""
+        
+        # Split by common stop patterns and take only the first part
+        stop_patterns = [
+            'assistant', 'i am a', 'here is', 'summary', 'experience',
+            'looking for', 'software developer', 'job search', 'degree in'
+        ]
+        
+        text_lower = text.lower()
+        earliest_stop = len(text)
+        
+        for pattern in stop_patterns:
+            pos = text_lower.find(pattern)
+            if pos != -1 and pos < earliest_stop:
+                earliest_stop = pos
+        
+        if earliest_stop < len(text):
+            text = text[:earliest_stop].strip()
+        
+        # Remove any incomplete lines at the end
+        lines = text.split('\n')
+        clean_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            if line and not any(word in line.lower() for word in stop_patterns):
+                clean_lines.append(line)
+            else:
+                break
+        
+        return '\n'.join(clean_lines).strip()
     
     def generate_sql(self, question: str, max_tokens: int = 512, temperature: float = 0.1) -> str:
-        """Generate T-SQL query from natural language question"""
+        """Generate T-SQL query from natural language question with GPU optimization"""
         
         try:
             # Create prompt
             prompt = self.create_prompt(question)
             
-            # Tokenize input
+            # Tokenize input with GPU-optimized settings
             inputs = self.tokenizer(
                 prompt, 
                 return_tensors="pt", 
                 truncation=True, 
-                max_length=2048
+                max_length=2048,
+                padding=False  # Don't pad for single input
             )
             
-            # Move to appropriate device
-            inputs = {k: v.to(next(self.model.parameters()).device) for k, v in inputs.items()}
+            # Move inputs to the same device as model (GPU if available)
+            model_device = next(self.model.parameters()).device
+            inputs = {k: v.to(model_device, non_blocking=True) for k, v in inputs.items()}
             
-            # Generate response
+            # Optimize generation settings for GPU
+            generation_kwargs = {
+                "max_new_tokens": max_tokens,
+                "temperature": temperature,
+                "do_sample": True if temperature > 0 else False,
+                "pad_token_id": self.tokenizer.eos_token_id,
+                "eos_token_id": self.tokenizer.eos_token_id,
+                "repetition_penalty": 1.1,
+                "early_stopping": True,
+                "use_cache": True,
+            }
+            
+            # Add GPU-specific optimizations
+            if torch.cuda.is_available():
+                generation_kwargs.update({
+                    "num_beams": 1,  # Faster on GPU
+                    "length_penalty": 1.0,
+                })
+            
+            # Generate response with GPU optimization
             with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=max_tokens,
-                    temperature=temperature,
-                    do_sample=True if temperature > 0 else False,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id
-                )
+                if torch.cuda.is_available():
+                    # Use autocast for mixed precision on GPU
+                    with torch.cuda.amp.autocast():
+                        outputs = self.model.generate(
+                            **inputs,
+                            **generation_kwargs
+                        )
+                else:
+                    outputs = self.model.generate(
+                        **inputs,
+                        **generation_kwargs
+                    )
+            
+            # Move output back to CPU for decoding if needed
+            if torch.cuda.is_available():
+                outputs = outputs.cpu()
             
             # Decode response
             generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -192,10 +314,17 @@ Generate a SQL query to answer this question: `{question}`
             # Extract SQL from the generated text
             sql_query = self.extract_sql_from_response(generated_text[len(prompt):])
             
+            # Clear GPU cache after generation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             return sql_query
             
         except Exception as e:
             logger.error(f"Error generating SQL: {str(e)}")
+            # Clear GPU cache on error
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             return f"Error: {str(e)}"
 
 def main():
