@@ -1,6 +1,7 @@
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import logging
+import re
 
 # Check GPU availability and set device
 if torch.cuda.is_available():
@@ -156,7 +157,7 @@ class SQLGenerator:
         """Create a properly formatted prompt for the SQLCoder model"""
         
         prompt = f"""### Task
-Generate a T-SQL query to answer this question: `{question}`. Return only SQL code, no explanation.very important no explation 
+Generate a T-SQL query to answer this question: `{question}`. Return only SQL code, no explanation.
 
 ### Database Schema
 {DATABASE_SCHEMA}
@@ -170,29 +171,44 @@ Generate a T-SQL query to answer this question: `{question}`. Return only SQL co
         return prompt
     
     def extract_sql_from_response(self, response: str) -> str:
-        """Extract SQL query from model response with improved debugging"""
-        
-        logger.info(f"Raw response length: {len(response)}")
-        logger.info(f"Raw response preview: {response[:200]}...")
+        """Extract SQL query from model response - return only clean SQL"""
         
         # Clean up the response first
         response = response.strip()
         
         if not response:
-            logger.warning("Empty response received")
-            return "No SQL query generated"
+            return ""
         
-        # Look for SQL code blocks first
+        # Method 1: Look for SQL code blocks first
         if "```sql" in response:
             sql_start = response.find("```sql") + 6
             sql_end = response.find("```", sql_start)
             if sql_end != -1:
                 sql_query = response[sql_start:sql_end].strip()
-                logger.info(f"Found SQL in code block: {sql_query[:100]}...")
-                return sql_query
+                return self.clean_sql_query(sql_query)
         
-        # Look for SELECT statements
+        # Method 2: Look for SELECT statements and stop at unwanted content
         if "SELECT" in response.upper():
+            # Split by common stop words that indicate conversational text
+            stop_patterns = [
+                'assistant:', 'i\'m happy', 'however,', 'it seems', 'could you',
+                'rephrase', 'provide more', 'better understand', 'i can better',
+                'note:', 'explanation:', 'here is', 'here\'s', 'let me', 'would you',
+                'please', 'sorry', 'apologize', 'understand', 'help you'
+            ]
+            
+            # Find the earliest occurrence of any stop pattern
+            earliest_stop = len(response)
+            for pattern in stop_patterns:
+                pos = response.lower().find(pattern.lower())
+                if pos != -1 and pos < earliest_stop:
+                    earliest_stop = pos
+            
+            # Extract text before the stop pattern
+            if earliest_stop < len(response):
+                response = response[:earliest_stop].strip()
+            
+            # Now extract SQL
             lines = response.split('\n')
             sql_lines = []
             capturing = False
@@ -200,16 +216,17 @@ Generate a T-SQL query to answer this question: `{question}`. Return only SQL co
             for line in lines:
                 line = line.strip()
                 
-                # Start capturing when we see SELECT
-                if "SELECT" in line.upper():
+                # Skip empty lines and comments
+                if not line or line.startswith('--'):
+                    continue
+                
+                # Start capturing when we see SELECT, WITH, INSERT, UPDATE, DELETE
+                if any(keyword in line.upper() for keyword in ['SELECT', 'WITH', 'INSERT', 'UPDATE', 'DELETE']):
                     capturing = True
                 
                 if capturing:
-                    # Stop if we hit common stop patterns
-                    if any(stop_word in line.lower() for stop_word in [
-                        'assistant', 'i am a', 'here is', 'summary', 'experience',
-                        'looking for', 'software developer', 'job search', 'note:', 'explanation:'
-                    ]):
+                    # Stop if we hit conversational text
+                    if any(phrase in line.lower() for phrase in stop_patterns):
                         break
                     
                     sql_lines.append(line)
@@ -220,15 +237,68 @@ Generate a T-SQL query to answer this question: `{question}`. Return only SQL co
             
             if sql_lines:
                 sql_result = '\n'.join(sql_lines).strip()
-                logger.info(f"Extracted SQL from SELECT: {sql_result[:100]}...")
-                return sql_result
+                return self.clean_sql_query(sql_result)
         
-        # If no SQL found, return debug info
-        logger.warning("No SQL query found in response")
-        return f"Debug - Response preview: {response[:500]}..."
+        # Method 3: Use regex to extract SQL patterns
+        sql_pattern = r'((?:SELECT|WITH|INSERT|UPDATE|DELETE).*?(?:;|$))'
+        matches = re.findall(sql_pattern, response, re.IGNORECASE | re.DOTALL)
+        if matches:
+            sql_query = matches[0].strip()
+            # Remove any trailing non-SQL content
+            for pattern in ['assistant:', 'however,', 'i\'m happy', 'could you']:
+                if pattern in sql_query.lower():
+                    sql_query = sql_query[:sql_query.lower().find(pattern)].strip()
+                    break
+            return self.clean_sql_query(sql_query)
+        
+        # Return empty string if no SQL found
+        return ""
     
-    def generate_sql(self, question: str, max_tokens: int = 512, temperature: float = 0.1) -> str:
-        """Generate T-SQL query from natural language question with improved debugging"""
+    def clean_sql_query(self, sql_query: str) -> str:
+        """Clean and validate the extracted SQL query - return only SQL"""
+        
+        # Remove any remaining conversational text
+        lines = sql_query.split('\n')
+        clean_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            # Skip lines that look like conversational text or are empty
+            if not line:
+                continue
+                
+            # Skip obvious conversational lines
+            if any(phrase in line.lower() for phrase in [
+                'assistant:', 'i\'m happy', 'however,', 'it seems', 'could you',
+                'rephrase', 'provide more', 'better understand', 'note:', 'explanation:',
+                'here is', 'here\'s', 'let me', 'would you', 'please', 'sorry',
+                'apologize', 'understand', 'help you', 'question', 'context'
+            ]):
+                break
+            
+            # Only add lines that look like SQL
+            if (line.upper().startswith(('SELECT', 'FROM', 'WHERE', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 
+                                      'GROUP', 'ORDER', 'HAVING', 'UNION', 'WITH', 'INSERT', 
+                                      'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP')) or
+                line.strip().endswith((',', ';')) or
+                any(keyword in line.upper() for keyword in [' AS ', ' ON ', ' AND ', ' OR ', ' IN ', ' NOT '])):
+                clean_lines.append(line)
+            elif clean_lines:  # If we've started collecting SQL and hit non-SQL, stop
+                break
+        
+        if not clean_lines:
+            return ""
+        
+        cleaned_sql = '\n'.join(clean_lines).strip()
+        
+        # Ensure it ends with semicolon if it doesn't already
+        if cleaned_sql and not cleaned_sql.endswith(';'):
+            cleaned_sql += ';'
+        
+        return cleaned_sql
+    
+    def generate_sql(self, question: str, max_tokens: int = 256, temperature: float = 0.1) -> str:
+        """Generate T-SQL query from natural language question with improved parsing"""
         
         try:
             logger.info(f"Generating SQL for question: {question}")
@@ -252,17 +322,19 @@ Generate a T-SQL query to answer this question: `{question}`. Return only SQL co
             model_device = next(self.model.parameters()).device
             inputs = {k: v.to(model_device, non_blocking=True) for k, v in inputs.items()}
             
-            # Generation settings
+            # Generation settings - more restrictive to reduce unwanted text
             generation_kwargs = {
-                "max_new_tokens": max_tokens,
+                "max_new_tokens": max_tokens,  # Reduced from 512
                 "temperature": temperature,
                 "do_sample": True if temperature > 0 else False,
                 "pad_token_id": self.tokenizer.eos_token_id,
                 "eos_token_id": self.tokenizer.eos_token_id,
                 "repetition_penalty": 1.1,
-                "early_stopping": False,  # Changed to False
+                "early_stopping": True,  # Changed back to True
                 "use_cache": True,
                 "num_beams": 1,
+                # Add stopping criteria
+                "stop_strings": ["assistant:", "However,", "I'm happy", "Could you please"],
             }
             
             logger.info("Starting generation...")
@@ -271,7 +343,7 @@ Generate a T-SQL query to answer this question: `{question}`. Return only SQL co
             with torch.no_grad():
                 if torch.cuda.is_available():
                     # Use autocast for mixed precision on GPU
-                    with torch.amp.autocast('cuda'):  # Updated autocast call
+                    with torch.amp.autocast('cuda'):
                         outputs = self.model.generate(
                             **inputs,
                             **generation_kwargs
@@ -375,11 +447,13 @@ def main():
             
             print("\nGenerated SQL:")
             print("-" * 30)
-            if sql_query and sql_query.strip():
+            if sql_query and sql_query.strip() and not sql_query.startswith("Debug"):
                 print(sql_query)
             else:
                 print("No SQL query was generated. Please try rephrasing your question.")
                 print("For example: 'Count all policies' or 'Show all open claims'")
+                if sql_query.startswith("Debug"):
+                    print(f"\n{sql_query}")
             print("-" * 30)
             
         except KeyboardInterrupt:
@@ -395,10 +469,10 @@ def test_simple_queries():
     sql_generator = SQLGenerator()
     
     test_questions = [
-        "SELECT COUNT(*) FROM dwh.dim_policy",
         "How many policies are there?",
-        "Show me all tables",
-        "Count the total policies"
+        "What are the unique policies available?",
+        "Show me all open claims",
+        "Count total premium amount"
     ]
     
     print("Testing simple queries...")
