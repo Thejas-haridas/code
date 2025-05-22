@@ -192,11 +192,21 @@ Generate a T-SQL query to answer this question: `{question}`. Return only the SQ
                 sql_query = response[sql_start:sql_end].strip()
                 return self.clean_sql_query(sql_query)
         
-        # Method 2: Look for SELECT statements and stop at unwanted content
+        # Method 2: Find first semicolon and extract everything before it as SQL
+        semicolon_pos = response.find(';')
+        if semicolon_pos != -1:
+            # Extract everything up to and including the first semicolon
+            potential_sql = response[:semicolon_pos + 1].strip()
+            
+            # Check if it contains SQL keywords
+            if any(keyword in potential_sql.upper() for keyword in ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'WITH']):
+                return self.clean_sql_query(potential_sql)
+        
+        # Method 3: Look for SELECT statements and stop at unwanted content
         if "SELECT" in response.upper():
             # Split by common stop words that indicate conversational text
             stop_patterns = [
-                'assistant:', 'i\'m happy', 'however,', 'it seems', 'could you',
+                'assistant', 'i\'m happy', 'however,', 'it seems', 'could you',
                 'rephrase', 'provide more', 'better understand', 'i can better',
                 'note:', 'explanation:', 'here is', 'here\'s', 'let me', 'would you',
                 'please', 'sorry', 'apologize', 'understand', 'help you'
@@ -244,16 +254,11 @@ Generate a T-SQL query to answer this question: `{question}`. Return only the SQ
                 sql_result = '\n'.join(sql_lines).strip()
                 return self.clean_sql_query(sql_result)
         
-        # Method 3: Use regex to extract SQL patterns
-        sql_pattern = r'((?:SELECT|WITH|INSERT|UPDATE|DELETE).*?(?:;|$))'
+        # Method 4: Use regex to extract SQL patterns - stop at first semicolon
+        sql_pattern = r'((?:SELECT|WITH|INSERT|UPDATE|DELETE).*?;)'
         matches = re.findall(sql_pattern, response, re.IGNORECASE | re.DOTALL)
         if matches:
             sql_query = matches[0].strip()
-            # Remove any trailing non-SQL content
-            for pattern in ['assistant:', 'however,', 'i\'m happy', 'could you']:
-                if pattern in sql_query.lower():
-                    sql_query = sql_query[:sql_query.lower().find(pattern)].strip()
-                    break
             return self.clean_sql_query(sql_query)
         
         # Return empty string if no SQL found
