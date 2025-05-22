@@ -156,7 +156,7 @@ class SQLGenerator:
         """Create a properly formatted prompt for the SQLCoder model"""
         
         prompt = f"""### Task
-Generate a tSQL query to answer this question: `{question}`.no other information is needed only the query for the azur sql server
+Generate a T-SQL query to answer this question: `{question}`. Return only SQL code, no explanation.very important no explation 
 
 ### Database Schema
 {DATABASE_SCHEMA}
@@ -255,7 +255,7 @@ Generate a tSQL query to answer this question: `{question}`.no other information
             # Generation settings
             generation_kwargs = {
                 "max_new_tokens": max_tokens,
-                "temperature": temperature,
+                "temperature": 3,
                 "do_sample": True if temperature > 0 else False,
                 "pad_token_id": self.tokenizer.eos_token_id,
                 "eos_token_id": self.tokenizer.eos_token_id,
