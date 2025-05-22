@@ -156,7 +156,7 @@ class SQLGenerator:
         """Create a properly formatted prompt for the SQLCoder model"""
         
         prompt = f"""### Task
-Generate a SQL query to answer this question: `{question}`
+Generate a tSQL query to answer this question: `{question}`.no other information is needed only the query for the azur sql server
 
 ### Database Schema
 {DATABASE_SCHEMA}
