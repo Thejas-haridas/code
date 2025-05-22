@@ -296,6 +296,10 @@ Generate a T-SQL query to answer this question: `{question}`. Return only the SQ
         
         cleaned_sql = '\n'.join(clean_lines).strip()
         
+        # Remove leading semicolons
+        while cleaned_sql.startswith(';'):
+            cleaned_sql = cleaned_sql[1:].strip()
+        
         # Ensure it ends with semicolon if it doesn't already
         if cleaned_sql and not cleaned_sql.endswith(';'):
             cleaned_sql += ';'
@@ -428,22 +432,51 @@ def process_question(sql_generator, question: str):
     
     if result.get("success"):
         print("✅ Query executed successfully!")
-        if result.get("data"):
-            print(f"Rows returned: {result.get('row_count', 0)}")
-            print(f"Columns: {result.get('columns', [])}")
-            
-            # Display first few rows of data if available
+        
+        # Check if we have data (SELECT query result)
+        if result.get("data") is not None:
             data = result.get("data", [])
+            columns = result.get("columns", [])
+            row_count = result.get("row_count", 0)
+            
+            print(f"Rows returned: {row_count}")
+            print(f"Columns: {columns}")
+            
             if data:
-                print("\nSample data:")
-                for i, row in enumerate(data[:5]):  # Show first 5 rows
-                    print(f"  Row {i+1}: {row}")
-                if len(data) > 5:
-                    print(f"  ... and {len(data) - 5} more rows")
+                print("\nQuery Results:")
+                print("=" * 40)
+                
+                # Print column headers
+                if columns:
+                    header = " | ".join(str(col) for col in columns)
+                    print(header)
+                    print("-" * len(header))
+                
+                # Print data rows
+                for i, row in enumerate(data):
+                    if i < 10:  # Show first 10 rows
+                        if isinstance(row, dict):
+                            row_values = [str(row.get(col, '')) for col in columns] if columns else [str(v) for v in row.values()]
+                            print(" | ".join(row_values))
+                        else:
+                            print(str(row))
+                    
+                if len(data) > 10:
+                    print(f"... and {len(data) - 10} more rows")
+            else:
+                print("No data returned (empty result set)")
+                
         else:
-            print(f"Query executed. Rows affected: {result.get('row_count', 0)}")
+            # Non-SELECT query (INSERT, UPDATE, DELETE, etc.)
+            rows_affected = result.get("row_count", 0)
+            if rows_affected >= 0:
+                print(f"Query executed successfully. Rows affected: {rows_affected}")
+            else:
+                print("Query executed successfully.")
     else:
         print(f"❌ Query execution failed: {result.get('error', 'Unknown error')}")
+    
+    print("=" * 60)
 
 def main():
     """Main function to run the SQL generator with API execution"""
