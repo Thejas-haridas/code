@@ -154,10 +154,9 @@ class SQLGenerator:
             raise e
     
     def create_prompt(self, question: str) -> str:
-        """Create a properly formatted prompt for the SQLCoder model"""
-        
-        prompt = f"""### Task
-Generate a T-SQL query to answer this question: `{question}`. Return only SQL code, no explanation.
+    """Create a properly formatted prompt for the SQLCoder model"""
+    prompt = f"""### Task
+Generate a T-SQL query to answer this question: `{question}`. Return only the SQL query, ending with a semicolon. Do not include any explanations, comments, or additional text like 'assistant:'.
 
 ### Database Schema
 {DATABASE_SCHEMA}
@@ -167,8 +166,7 @@ Generate a T-SQL query to answer this question: `{question}`. Return only SQL co
 
 ### SQL Query
 ```sql"""
-        
-        return prompt
+    return prompt
     
     def extract_sql_from_response(self, response: str) -> str:
         """Extract SQL query from model response - return only clean SQL"""
