@@ -255,7 +255,7 @@ Generate a T-SQL query to answer this question: `{question}`. Return only SQL co
             # Generation settings
             generation_kwargs = {
                 "max_new_tokens": max_tokens,
-                "temperature": 3,
+                "temperature": temperature,
                 "do_sample": True if temperature > 0 else False,
                 "pad_token_id": self.tokenizer.eos_token_id,
                 "eos_token_id": self.tokenizer.eos_token_id,
