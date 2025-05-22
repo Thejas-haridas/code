@@ -83,6 +83,8 @@ Based on the user's question, generate an SQL query. The query should always inc
 necessary table joins based on the following rules:
 - For a policy-related question, join 'fct_policy' and 'dim_policy' on 'policy_number' and 'org_id'.
 - For a claims-related question, join 'fact_claims_dtl' and 'dim_claims' on 'claim_reference_id' and 'org_id'.
+- Always use proper T-SQL syntax.
+- Return only the SQL query without any explanatory text.
 """
 
 class SQLGenerator:
@@ -168,19 +170,28 @@ Generate a SQL query to answer this question: `{question}`
         return prompt
     
     def extract_sql_from_response(self, response: str) -> str:
-        """Extract SQL query from model response"""
+        """Extract SQL query from model response with improved debugging"""
+        
+        logger.info(f"Raw response length: {len(response)}")
+        logger.info(f"Raw response preview: {response[:200]}...")
         
         # Clean up the response first
         response = response.strip()
         
-        # Look for SQL code blocks
+        if not response:
+            logger.warning("Empty response received")
+            return "No SQL query generated"
+        
+        # Look for SQL code blocks first
         if "```sql" in response:
             sql_start = response.find("```sql") + 6
             sql_end = response.find("```", sql_start)
             if sql_end != -1:
-                return response[sql_start:sql_end].strip()
+                sql_query = response[sql_start:sql_end].strip()
+                logger.info(f"Found SQL in code block: {sql_query[:100]}...")
+                return sql_query
         
-        # Look for SELECT statements and stop at common endpoints
+        # Look for SELECT statements
         if "SELECT" in response.upper():
             lines = response.split('\n')
             sql_lines = []
@@ -197,7 +208,7 @@ Generate a SQL query to answer this question: `{question}`
                     # Stop if we hit common stop patterns
                     if any(stop_word in line.lower() for stop_word in [
                         'assistant', 'i am a', 'here is', 'summary', 'experience',
-                        'looking for', 'software developer', 'job search'
+                        'looking for', 'software developer', 'job search', 'note:', 'explanation:'
                     ]):
                         break
                     
@@ -207,70 +218,41 @@ Generate a SQL query to answer this question: `{question}`
                     if line.endswith(';'):
                         break
             
-            sql_result = '\n'.join(sql_lines).strip()
-            
-            # Additional cleanup - remove any trailing non-SQL content
-            sql_result = self.clean_trailing_content(sql_result)
-            
-            return sql_result
+            if sql_lines:
+                sql_result = '\n'.join(sql_lines).strip()
+                logger.info(f"Extracted SQL from SELECT: {sql_result[:100]}...")
+                return sql_result
         
-        # Return cleaned response
-        return self.clean_trailing_content(response)
-    
-    def clean_trailing_content(self, text: str) -> str:
-        """Remove unwanted trailing content from SQL"""
-        
-        # Split by common stop patterns and take only the first part
-        stop_patterns = [
-            'assistant', 'i am a', 'here is', 'summary', 'experience',
-            'looking for', 'software developer', 'job search', 'degree in'
-        ]
-        
-        text_lower = text.lower()
-        earliest_stop = len(text)
-        
-        for pattern in stop_patterns:
-            pos = text_lower.find(pattern)
-            if pos != -1 and pos < earliest_stop:
-                earliest_stop = pos
-        
-        if earliest_stop < len(text):
-            text = text[:earliest_stop].strip()
-        
-        # Remove any incomplete lines at the end
-        lines = text.split('\n')
-        clean_lines = []
-        
-        for line in lines:
-            line = line.strip()
-            if line and not any(word in line.lower() for word in stop_patterns):
-                clean_lines.append(line)
-            else:
-                break
-        
-        return '\n'.join(clean_lines).strip()
+        # If no SQL found, return debug info
+        logger.warning("No SQL query found in response")
+        return f"Debug - Response preview: {response[:500]}..."
     
     def generate_sql(self, question: str, max_tokens: int = 512, temperature: float = 0.1) -> str:
-        """Generate T-SQL query from natural language question with GPU optimization"""
+        """Generate T-SQL query from natural language question with improved debugging"""
         
         try:
+            logger.info(f"Generating SQL for question: {question}")
+            
             # Create prompt
             prompt = self.create_prompt(question)
+            logger.info(f"Prompt length: {len(prompt)}")
             
-            # Tokenize input with GPU-optimized settings
+            # Tokenize input
             inputs = self.tokenizer(
                 prompt, 
                 return_tensors="pt", 
                 truncation=True, 
                 max_length=2048,
-                padding=False  # Don't pad for single input
+                padding=False
             )
             
-            # Move inputs to the same device as model (GPU if available)
+            logger.info(f"Input token length: {inputs['input_ids'].shape[1]}")
+            
+            # Move inputs to the same device as model
             model_device = next(self.model.parameters()).device
             inputs = {k: v.to(model_device, non_blocking=True) for k, v in inputs.items()}
             
-            # Optimize generation settings for GPU
+            # Generation settings
             generation_kwargs = {
                 "max_new_tokens": max_tokens,
                 "temperature": temperature,
@@ -278,22 +260,18 @@ Generate a SQL query to answer this question: `{question}`
                 "pad_token_id": self.tokenizer.eos_token_id,
                 "eos_token_id": self.tokenizer.eos_token_id,
                 "repetition_penalty": 1.1,
-                "early_stopping": True,
+                "early_stopping": False,  # Changed to False
                 "use_cache": True,
+                "num_beams": 1,
             }
             
-            # Add GPU-specific optimizations
-            if torch.cuda.is_available():
-                generation_kwargs.update({
-                    "num_beams": 1,  # Faster on GPU
-                    "length_penalty": 1.0,
-                })
+            logger.info("Starting generation...")
             
-            # Generate response with GPU optimization
+            # Generate response
             with torch.no_grad():
                 if torch.cuda.is_available():
                     # Use autocast for mixed precision on GPU
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast('cuda'):  # Updated autocast call
                         outputs = self.model.generate(
                             **inputs,
                             **generation_kwargs
@@ -304,15 +282,22 @@ Generate a SQL query to answer this question: `{question}`
                         **generation_kwargs
                     )
             
+            logger.info("Generation completed")
+            
             # Move output back to CPU for decoding if needed
             if torch.cuda.is_available():
                 outputs = outputs.cpu()
             
             # Decode response
             generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            logger.info(f"Generated text length: {len(generated_text)}")
+            
+            # Extract the new content (remove the prompt part)
+            new_content = generated_text[len(prompt):].strip()
+            logger.info(f"New content length: {len(new_content)}")
             
             # Extract SQL from the generated text
-            sql_query = self.extract_sql_from_response(generated_text[len(prompt):])
+            sql_query = self.extract_sql_from_response(new_content)
             
             # Clear GPU cache after generation
             if torch.cuda.is_available():
@@ -327,14 +312,40 @@ Generate a SQL query to answer this question: `{question}`
                 torch.cuda.empty_cache()
             return f"Error: {str(e)}"
 
+    def get_table_info_query(self):
+        """Return a query to show available tables"""
+        return """SELECT 
+    'dwh.dim_claims' as table_name,
+    'Claims dimension table' as description
+UNION ALL
+SELECT 
+    'dwh.dim_policy' as table_name,
+    'Policy dimension table' as description
+UNION ALL
+SELECT 
+    'dwh.fact_claims_dtl' as table_name,
+    'Claims fact detail table' as description
+UNION ALL
+SELECT 
+    'dwh.fact_premium' as table_name,
+    'Premium fact table' as description
+UNION ALL
+SELECT 
+    'dwh.fct_policy' as table_name,
+    'Policy fact table' as description;"""
+
 def main():
-    """Main function to run the SQL generator"""
+    """Main function to run the SQL generator with improved debugging"""
     
     # Initialize the SQL generator
-    sql_generator = SQLGenerator()
+    try:
+        sql_generator = SQLGenerator()
+    except Exception as e:
+        print(f"Failed to initialize SQL generator: {e}")
+        return
     
     print("T-SQL Query Generator is ready!")
-    print("Enter your questions (type 'quit' to exit):")
+    print("Enter your questions (type 'quit' to exit, 'tables' to see available tables):")
     print("-" * 50)
     
     while True:
@@ -349,6 +360,14 @@ def main():
             if not question:
                 continue
             
+            # Handle special commands
+            if question.lower() in ['tables', 'show tables', 'what tables']:
+                print("\nAvailable Tables:")
+                print("-" * 30)
+                print(sql_generator.get_table_info_query())
+                print("-" * 30)
+                continue
+            
             print("Generating SQL query...")
             
             # Generate SQL
@@ -356,41 +375,47 @@ def main():
             
             print("\nGenerated SQL:")
             print("-" * 30)
-            print(sql_query)
+            if sql_query and sql_query.strip():
+                print(sql_query)
+            else:
+                print("No SQL query was generated. Please try rephrasing your question.")
+                print("For example: 'Count all policies' or 'Show all open claims'")
             print("-" * 30)
             
         except KeyboardInterrupt:
             print("\nGoodbye!")
             break
         except Exception as e:
+            logger.error(f"Error in main loop: {str(e)}")
             print(f"Error: {str(e)}")
 
-# Example usage function
-def generate_example_queries():
-    """Generate some example queries"""
+def test_simple_queries():
+    """Test with some simple queries for debugging"""
     
     sql_generator = SQLGenerator()
     
-    example_questions = [
-        "Show me all policies with their total premium amount",
-        "Find all claims that are still open",
-        "What is the average claim amount by cause of loss?",
-        "Show me policies that expire this year",
-        "Find the top 10 highest value claims"
+    test_questions = [
+        "SELECT COUNT(*) FROM dwh.dim_policy",
+        "How many policies are there?",
+        "Show me all tables",
+        "Count the total policies"
     ]
     
-    print("Generating example queries...")
+    print("Testing simple queries...")
     print("=" * 50)
     
-    for i, question in enumerate(example_questions, 1):
+    for i, question in enumerate(test_questions, 1):
         print(f"\n{i}. Question: {question}")
-        sql_query = sql_generator.generate_sql(question)
-        print(f"SQL:\n{sql_query}")
+        try:
+            sql_query = sql_generator.generate_sql(question)
+            print(f"SQL:\n{sql_query}")
+        except Exception as e:
+            print(f"Error: {e}")
         print("-" * 30)
 
 if __name__ == "__main__":
     # Uncomment the line below to run interactive mode
     main()
     
-    # Uncomment the line below to generate example queries
-    # generate_example_queries()
+    # Uncomment the line below to test simple queries
+    # test_simple_queries()
