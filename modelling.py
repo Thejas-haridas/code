@@ -157,7 +157,7 @@ class SQLGenerator:
         """Create a properly formatted prompt for the SQLCoder model"""
         
         prompt = f"""### Task
-Generate a T-SQL query to answer this question: `{question}`. Return only SQL code, no explanation.
+Generate a T-SQL query to answer this question: `{question}`. Return only the SQL query, ending with a semicolon. Do not include any explanations, comments, or additional text like 'assistant:'.
 
 ### Database Schema
 {DATABASE_SCHEMA}
