@@ -328,7 +328,8 @@ Generate a T-SQL query to answer this question: `{question}`. Return only the SQ
                 "early_stopping": True,
                 "use_cache": True,
                 "num_beams": 1,
-                "tokenizer": self.tokenizer,  # Add tokenizer for stop strings
+                "tokenizer": self.tokenizer,
+                "stop_strings": ['assistant:', '\n\n'],# Add tokenizer for stop strings
             }
             
             # Generate response
