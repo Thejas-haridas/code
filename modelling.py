@@ -1,7 +1,16 @@
+import requests
+import json
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import logging
 import re
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# API endpoint configuration
+API_ENDPOINT = "http://172.200.64.182:7860/execute"
 
 # Check GPU availability and set device
 if torch.cuda.is_available():
@@ -12,10 +21,6 @@ if torch.cuda.is_available():
 else:
     device = torch.device("cpu")
     print("No GPU detected, using CPU")
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Database schema
 DATABASE_SCHEMA = """
@@ -328,8 +333,6 @@ Generate a T-SQL query to answer this question: `{question}`. Return only the SQ
                 "early_stopping": True,
                 "use_cache": True,
                 "num_beams": 1,
-                "tokenizer": self.tokenizer,
-                "stop_strings": ['assistant:', '\n\n'],# Add tokenizer for stop strings
             }
             
             # Generate response
@@ -363,111 +366,150 @@ Generate a T-SQL query to answer this question: `{question}`. Return only the SQ
             # Clear GPU cache on error
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            logger.error(f"Error generating SQL: {str(e)}")
             return ""
 
-    def get_table_info_query(self):
-        """Return a query to show available tables"""
-        return """SELECT 
-    'dwh.dim_claims' as table_name,
-    'Claims dimension table' as description
-UNION ALL
-SELECT 
-    'dwh.dim_policy' as table_name,
-    'Policy dimension table' as description
-UNION ALL
-SELECT 
-    'dwh.fact_claims_dtl' as table_name,
-    'Claims fact detail table' as description
-UNION ALL
-SELECT 
-    'dwh.fact_premium' as table_name,
-    'Premium fact table' as description
-UNION ALL
-SELECT 
-    'dwh.fct_policy' as table_name,
-    'Policy fact table' as description;"""
+def execute_sql_via_api(sql_query: str):
+    """Execute SQL query by calling the API endpoint"""
+    try:
+        # Prepare the request payload
+        payload = {
+            "query": sql_query
+        }
+        
+        # Make API call
+        response = requests.post(
+            API_ENDPOINT,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        
+        # Check if request was successful
+        if response.status_code == 200:
+            result = response.json()
+            return result
+        else:
+            return {
+                "success": False,
+                "error": f"API request failed with status {response.status_code}: {response.text}"
+            }
+            
+    except requests.exceptions.RequestException as e:
+        return {
+            "success": False,
+            "error": f"API connection error: {str(e)}"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Unexpected error: {str(e)}"
+        }
+
+def process_question(sql_generator, question: str):
+    """Process a natural language question: generate SQL and execute it via API"""
+    print(f"\nQuestion: {question}")
+    print("-" * 50)
+    
+    # Generate SQL
+    print("Generating SQL query...")
+    sql_query = sql_generator.generate_sql(question)
+    
+    if not sql_query:
+        print("❌ Failed to generate SQL query")
+        return
+    
+    print(f"Generated SQL:\n{sql_query}")
+    print("-" * 30)
+    
+    # Execute via API
+    print("Executing SQL via API...")
+    result = execute_sql_via_api(sql_query)
+    
+    if result.get("success"):
+        print("✅ Query executed successfully!")
+        if result.get("data"):
+            print(f"Rows returned: {result.get('row_count', 0)}")
+            print(f"Columns: {result.get('columns', [])}")
+            
+            # Display first few rows of data if available
+            data = result.get("data", [])
+            if data:
+                print("\nSample data:")
+                for i, row in enumerate(data[:5]):  # Show first 5 rows
+                    print(f"  Row {i+1}: {row}")
+                if len(data) > 5:
+                    print(f"  ... and {len(data) - 5} more rows")
+        else:
+            print(f"Query executed. Rows affected: {result.get('row_count', 0)}")
+    else:
+        print(f"❌ Query execution failed: {result.get('error', 'Unknown error')}")
 
 def main():
-    """Main function to run the SQL generator with improved debugging"""
+    """Main function to run the SQL generator with API execution"""
     
     # Initialize the SQL generator
+    try:
+        print("Initializing SQL Generator...")
+        sql_generator = SQLGenerator()
+        print("✅ SQL Generator ready!")
+    except Exception as e:
+        print(f"❌ Failed to initialize SQL generator: {e}")
+        return
+    
+    print(f"\nAPI Endpoint: {API_ENDPOINT}")
+    print("=" * 60)
+    print("Natural Language to SQL Query Generator with API Execution")
+    print("=" * 60)
+    print("Enter your questions (type 'quit' to exit):")
+    
+    while True:
+        try:
+            # Get user input
+            question = input("\n🤔 Your question: ").strip()
+            
+            if question.lower() in ['quit', 'exit', 'q']:
+                print("👋 Goodbye!")
+                break
+            
+            if not question:
+                continue
+            
+            # Process the question
+            process_question(sql_generator, question)
+            
+        except KeyboardInterrupt:
+            print("\n👋 Goodbye!")
+            break
+        except Exception as e:
+            logger.error(f"Error in main loop: {str(e)}")
+            print(f"❌ Error: {str(e)}")
+
+def test_sample_questions():
+    """Test with sample questions"""
+    
+    print("Testing with sample questions...")
+    
     try:
         sql_generator = SQLGenerator()
     except Exception as e:
         print(f"Failed to initialize SQL generator: {e}")
         return
     
-    print("T-SQL Query Generator is ready!")
-    print("Enter your questions (type 'quit' to exit, 'tables' to see available tables):")
-    print("-" * 50)
-    
-    while True:
-        try:
-            # Get user input
-            question = input("\nQuestion: ").strip()
-            
-            if question.lower() in ['quit', 'exit', 'q']:
-                print("Goodbye!")
-                break
-            
-            if not question:
-                continue
-            
-            # Handle special commands
-            if question.lower() in ['tables', 'show tables', 'what tables']:
-                print("\nAvailable Tables:")
-                print("-" * 30)
-                print(sql_generator.get_table_info_query())
-                print("-" * 30)
-                continue
-            
-            print("Generating SQL query...")
-            
-            # Generate SQL
-            sql_query = sql_generator.generate_sql(question)
-            
-            if sql_query and sql_query.strip():
-                print(sql_query)
-            else:
-                print("No SQL query generated. Please try rephrasing your question.")
-            
-        except KeyboardInterrupt:
-            print("\nGoodbye!")
-            break
-        except Exception as e:
-            logger.error(f"Error in main loop: {str(e)}")
-            print(f"Error: {str(e)}")
-
-def test_simple_queries():
-    """Test with some simple queries for debugging"""
-    
-    sql_generator = SQLGenerator()
-    
-    test_questions = [
+    sample_questions = [
         "How many policies are there?",
-        "What are the unique policies available?",
-        "Show me all open claims",
-        "Count total premium amount"
+        "What are the total claims by status?",
+        "Show me the top 5 policies by premium amount",
+        "Count the number of open claims"
     ]
     
-    print("Testing simple queries...")
-    print("=" * 50)
-    
-    for i, question in enumerate(test_questions, 1):
-        print(f"\n{i}. Question: {question}")
-        try:
-            sql_query = sql_generator.generate_sql(question)
-            if sql_query:
-                print(sql_query)
-            else:
-                print("No SQL generated")
-        except Exception as e:
-            print("Error occurred")
-        print("-" * 30)
+    for question in sample_questions:
+        process_question(sql_generator, question)
+        print("\n" + "="*60)
 
 if __name__ == "__main__":
-    # Uncomment the line below to run interactive mode
+    # Run interactive mode
     main()
     
-    # Uncomment the line below to test simple queries
-    # test_simple_queries()
+    # Uncomment below to run tests instead
+    # test_sample_questions()
