@@ -425,7 +425,7 @@ def process_question(sql_generator, question: str):
     sql_query = sql_generator.generate_sql(question)
     
     if not sql_query:
-        print("❌ Failed to generate SQL query")
+        print("Failed to generate SQL query")
         return
     
     print(f"Generated SQL:\n{sql_query}")
@@ -436,7 +436,7 @@ def process_question(sql_generator, question: str):
     result = execute_sql_via_api(sql_query)
     
     if result.get("success"):
-        print("✅ Query executed successfully!")
+        print("Query executed successfully!")
         
         # Check if we have data (SELECT query result)
         if result.get("data") is not None:
@@ -479,7 +479,7 @@ def process_question(sql_generator, question: str):
             else:
                 print("Query executed successfully.")
     else:
-        print(f"❌ Query execution failed: {result.get('error', 'Unknown error')}")
+        print(f"Query execution failed: {result.get('error', 'Unknown error')}")
     
     print("=" * 60)
 
@@ -490,9 +490,9 @@ def main():
     try:
         print("Initializing SQL Generator...")
         sql_generator = SQLGenerator()
-        print("✅ SQL Generator ready!")
+        print("SQL Generator ready!")
     except Exception as e:
-        print(f"❌ Failed to initialize SQL generator: {e}")
+        print(f"Failed to initialize SQL generator: {e}")
         return
     
     print(f"\nAPI Endpoint: {API_ENDPOINT}")
@@ -504,10 +504,10 @@ def main():
     while True:
         try:
             # Get user input
-            question = input("\n🤔 Your question: ").strip()
+            question = input("\nYour question: ").strip()
             
             if question.lower() in ['quit', 'exit', 'q']:
-                print("👋 Goodbye!")
+                print("Goodbye!")
                 break
             
             if not question:
@@ -517,11 +517,11 @@ def main():
             process_question(sql_generator, question)
             
         except KeyboardInterrupt:
-            print("\n👋 Goodbye!")
+            print("\nGoodbye!")
             break
         except Exception as e:
             logger.error(f"Error in main loop: {str(e)}")
-            print(f"❌ Error: {str(e)}")
+            print(f" Error: {str(e)}")
 
 def test_sample_questions():
     """Test with sample questions"""
