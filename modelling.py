@@ -297,15 +297,12 @@ Generate a T-SQL query to answer this question: `{question}`. Return only SQL co
         
         return cleaned_sql
     
-    def generate_sql(self, question: str, max_tokens: int = 256, temperature: float = 0.1) -> str:
-        """Generate T-SQL query from natural language question with improved parsing"""
+    def generate_sql(self, question: str, max_tokens: int = 150, temperature: float = 0.0) -> str:
+        """Generate T-SQL query from natural language question - return only SQL"""
         
         try:
-            logger.info(f"Generating SQL for question: {question}")
-            
             # Create prompt
             prompt = self.create_prompt(question)
-            logger.info(f"Prompt length: {len(prompt)}")
             
             # Tokenize input
             inputs = self.tokenizer(
@@ -316,45 +313,31 @@ Generate a T-SQL query to answer this question: `{question}`. Return only SQL co
                 padding=False
             )
             
-            logger.info(f"Input token length: {inputs['input_ids'].shape[1]}")
-            
             # Move inputs to the same device as model
             model_device = next(self.model.parameters()).device
             inputs = {k: v.to(model_device, non_blocking=True) for k, v in inputs.items()}
             
-            # Generation settings - more restrictive to reduce unwanted text
+            # Generation settings - very restrictive to get only SQL
             generation_kwargs = {
-                "max_new_tokens": max_tokens,  # Reduced from 512
-                "temperature": temperature,
-                "do_sample": True if temperature > 0 else False,
+                "max_new_tokens": max_tokens,  # Very limited tokens
+                "temperature": temperature,    # No randomness
+                "do_sample": False,           # Deterministic output
                 "pad_token_id": self.tokenizer.eos_token_id,
                 "eos_token_id": self.tokenizer.eos_token_id,
-                "repetition_penalty": 1.1,
-                "early_stopping": True,  # Changed back to True
+                "repetition_penalty": 1.0,   # No penalty to avoid weird behavior
+                "early_stopping": True,
                 "use_cache": True,
                 "num_beams": 1,
-                # Add stopping criteria
-                "stop_strings": ["assistant:", "However,", "I'm happy", "Could you please"],
+                "tokenizer": self.tokenizer,  # Add tokenizer for stop strings
             }
-            
-            logger.info("Starting generation...")
             
             # Generate response
             with torch.no_grad():
                 if torch.cuda.is_available():
-                    # Use autocast for mixed precision on GPU
                     with torch.amp.autocast('cuda'):
-                        outputs = self.model.generate(
-                            **inputs,
-                            **generation_kwargs
-                        )
+                        outputs = self.model.generate(**inputs, **generation_kwargs)
                 else:
-                    outputs = self.model.generate(
-                        **inputs,
-                        **generation_kwargs
-                    )
-            
-            logger.info("Generation completed")
+                    outputs = self.model.generate(**inputs, **generation_kwargs)
             
             # Move output back to CPU for decoding if needed
             if torch.cuda.is_available():
@@ -362,11 +345,9 @@ Generate a T-SQL query to answer this question: `{question}`. Return only SQL co
             
             # Decode response
             generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            logger.info(f"Generated text length: {len(generated_text)}")
             
             # Extract the new content (remove the prompt part)
             new_content = generated_text[len(prompt):].strip()
-            logger.info(f"New content length: {len(new_content)}")
             
             # Extract SQL from the generated text
             sql_query = self.extract_sql_from_response(new_content)
@@ -375,14 +356,13 @@ Generate a T-SQL query to answer this question: `{question}`. Return only SQL co
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            return sql_query
+            return sql_query if sql_query else ""
             
         except Exception as e:
-            logger.error(f"Error generating SQL: {str(e)}")
             # Clear GPU cache on error
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            return f"Error: {str(e)}"
+            return ""
 
     def get_table_info_query(self):
         """Return a query to show available tables"""
@@ -445,16 +425,10 @@ def main():
             # Generate SQL
             sql_query = sql_generator.generate_sql(question)
             
-            print("\nGenerated SQL:")
-            print("-" * 30)
-            if sql_query and sql_query.strip() and not sql_query.startswith("Debug"):
+            if sql_query and sql_query.strip():
                 print(sql_query)
             else:
-                print("No SQL query was generated. Please try rephrasing your question.")
-                print("For example: 'Count all policies' or 'Show all open claims'")
-                if sql_query.startswith("Debug"):
-                    print(f"\n{sql_query}")
-            print("-" * 30)
+                print("No SQL query generated. Please try rephrasing your question.")
             
         except KeyboardInterrupt:
             print("\nGoodbye!")
@@ -482,9 +456,12 @@ def test_simple_queries():
         print(f"\n{i}. Question: {question}")
         try:
             sql_query = sql_generator.generate_sql(question)
-            print(f"SQL:\n{sql_query}")
+            if sql_query:
+                print(sql_query)
+            else:
+                print("No SQL generated")
         except Exception as e:
-            print(f"Error: {e}")
+            print("Error occurred")
         print("-" * 30)
 
 if __name__ == "__main__":
