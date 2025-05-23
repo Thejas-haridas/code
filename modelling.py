@@ -126,7 +126,7 @@ class SQLGenerator:
                     use_cache=True,
                     low_cpu_mem_usage=True,
                     # Additional optimization parameters
-                    attn_implementation="flash_attention_2" if hasattr(torch.nn, 'attention') else None,
+                    #attn_implementation="flash_attention_2" if hasattr(torch.nn, 'attention') else None,
                 )
                 
                 # Compile model for faster inference (PyTorch 2.0+)
