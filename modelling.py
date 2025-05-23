@@ -121,7 +121,7 @@ class SQLGenerator:
                     self.model_name,
                     trust_remote_code=True,
                     torch_dtype=torch.bfloat16,  # Use bfloat16 for better performance than float16
-                    load_in_4bit=True,  # More aggressive quantization than 8bit
+                    load_in_8bit=True,  # More aggressive quantization than 8bit
                     device_map="auto",
                     use_cache=True,
                     low_cpu_mem_usage=True,
