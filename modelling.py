@@ -4,6 +4,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import logging
 import re
+import time
+from functools import lru_cache
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -17,7 +19,7 @@ if torch.cuda.is_available():
     device = torch.device("cuda")
     print(f"GPU detected: {torch.cuda.get_device_name(0)}")
     print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
-    torch.cuda.empty_cache()  # Clear GPU cache
+    torch.cuda.empty_cache()
 else:
     device = torch.device("cpu")
     print("No GPU detected, using CPU")
@@ -97,282 +99,214 @@ class SQLGenerator:
     def __init__(self):
         self.model = None
         self.tokenizer = None
+        self.model_name = "defog/llama-3-sqlcoder-8b"
         self.load_model()
+        
+        # Cache for tokenized prompts
+        self._prompt_cache = {}
     
     def load_model(self):
-        """Load the SQLCoder model and tokenizer with GPU optimization"""
+        """Load the SQLCoder model and tokenizer with maximum GPU optimization"""
         try:
             logger.info("Loading Defog SQLCoder model...")
-            model_name = "defog/llama-3-sqlcoder-8b"
             
             # Load tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             
-            # Set optimal settings based on available hardware
             if torch.cuda.is_available():
-                logger.info("Loading model with GPU optimization...")
-                # For GPU with sufficient memory
+                logger.info("Loading model with aggressive GPU optimization...")
+                
+                # Use the most aggressive GPU optimizations
                 self.model = AutoModelForCausalLM.from_pretrained(
-                    model_name,
+                    self.model_name,
                     trust_remote_code=True,
-                    torch_dtype=torch.float16,  # Use FP16 for GPU
-                    load_in_8bit=True,
+                    torch_dtype=torch.bfloat16,  # Use bfloat16 for better performance than float16
+                    load_in_4bit=True,  # More aggressive quantization than 8bit
                     device_map="auto",
                     use_cache=True,
                     low_cpu_mem_usage=True,
+                    # Additional optimization parameters
+                    attn_implementation="flash_attention_2" if hasattr(torch.nn, 'attention') else None,
                 )
+                
+                # Compile model for faster inference (PyTorch 2.0+)
+                if hasattr(torch, 'compile'):
+                    logger.info("Compiling model for faster inference...")
+                    self.model = torch.compile(self.model, mode="reduce-overhead")
+                
             else:
-                logger.info("Loading model for CPU...")
-                # For CPU fallback
+                logger.info("Loading model for CPU with optimizations...")
                 self.model = AutoModelForCausalLM.from_pretrained(
-                    model_name,
+                    self.model_name,
                     trust_remote_code=True,
-                    torch_dtype=torch.float32,  # Use FP32 for CPU
+                    torch_dtype=torch.float32,
                     device_map="cpu",
                     use_cache=True,
                     low_cpu_mem_usage=True,
                 )
             
-            # Set pad token if not present
+            # Set pad token
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             
-            # Enable optimizations
+            # GPU optimizations
             if torch.cuda.is_available():
-                # Enable GPU optimizations
                 torch.backends.cudnn.benchmark = True
                 torch.backends.cudnn.enabled = True
-                
-                # Clear GPU cache
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
                 torch.cuda.empty_cache()
                 
-                # Get memory info
+                # Warm up the model with a dummy forward pass
+                self._warmup_model()
+                
                 memory_allocated = torch.cuda.memory_allocated() / 1024**3
                 memory_reserved = torch.cuda.memory_reserved() / 1024**3
                 logger.info(f"GPU Memory - Allocated: {memory_allocated:.2f} GB, Reserved: {memory_reserved:.2f} GB")
                 
             logger.info("Model loaded successfully!")
-            logger.info(f"Model device: {next(self.model.parameters()).device}")
             
         except Exception as e:
             logger.error(f"Failed to load model: {str(e)}")
             raise e
     
+    def _warmup_model(self):
+        """Warm up the model to optimize first inference"""
+        try:
+            logger.info("Warming up model...")
+            dummy_prompt = "SELECT COUNT(*) FROM table;"
+            inputs = self.tokenizer(dummy_prompt, return_tensors="pt", max_length=100)
+            model_device = next(self.model.parameters()).device
+            inputs = {k: v.to(model_device) for k, v in inputs.items()}
+            
+            with torch.no_grad():
+                _ = self.model.generate(**inputs, max_new_tokens=10, do_sample=False)
+            
+            torch.cuda.empty_cache()
+            logger.info("Model warmup completed")
+        except Exception as e:
+            logger.warning(f"Model warmup failed: {e}")
+    
+    @lru_cache(maxsize=128)
     def create_prompt(self, question: str) -> str:
-        """Create a properly formatted prompt for the SQLCoder model"""
-        
+        """Create a cached, optimized prompt"""
+        # Shorter, more focused prompt to reduce token count
         prompt = f"""### Task
-Generate a T-SQL query to answer this question: `{question}`. Return only the SQL query, ending with a semicolon. Do not include any explanations, comments, or additional text like 'assistant:'.
+Generate T-SQL for: {question}
 
-### Database Schema
+### Schema
 {DATABASE_SCHEMA}
 
-### Instructions
-{JOIN_RULES}
-
-### SQL Query
+### SQL
 ```sql"""
-        
         return prompt
     
     def extract_sql_from_response(self, response: str) -> str:
-        """Extract SQL query from model response - return only clean SQL"""
-        
-        # Clean up the response first
+        """Optimized SQL extraction with early termination"""
         response = response.strip()
-        
         if not response:
             return ""
         
-        # Method 1: Look for SQL code blocks first
+        # Fast path: Look for SQL in code blocks
         if "```sql" in response:
-            sql_start = response.find("```sql") + 6
-            sql_end = response.find("```", sql_start)
-            if sql_end != -1:
-                sql_query = response[sql_start:sql_end].strip()
-                return self.clean_sql_query(sql_query)
+            start = response.find("```sql") + 6
+            end = response.find("```", start)
+            if end != -1:
+                return self.clean_sql_query(response[start:end].strip())
         
-        # Method 2: Find first semicolon and extract everything before it as SQL
-        semicolon_pos = response.find(';')
-        if semicolon_pos != -1:
-            # Extract everything up to and including the first semicolon
-            potential_sql = response[:semicolon_pos + 1].strip()
-            
-            # Check if it contains SQL keywords
-            if any(keyword in potential_sql.upper() for keyword in ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'WITH']):
-                return self.clean_sql_query(potential_sql)
-        
-        # Method 3: Look for SELECT statements and stop at unwanted content
+        # Fast path: Find SELECT and stop at semicolon
         if "SELECT" in response.upper():
-            # Split by common stop words that indicate conversational text
-            stop_patterns = [
-                'assistant', 'i\'m happy', 'however,', 'it seems', 'could you',
-                'rephrase', 'provide more', 'better understand', 'i can better',
-                'note:', 'explanation:', 'here is', 'here\'s', 'let me', 'would you',
-                'please', 'sorry', 'apologize', 'understand', 'help you'
-            ]
-            
-            # Find the earliest occurrence of any stop pattern
-            earliest_stop = len(response)
-            for pattern in stop_patterns:
-                pos = response.lower().find(pattern.lower())
-                if pos != -1 and pos < earliest_stop:
-                    earliest_stop = pos
-            
-            # Extract text before the stop pattern
-            if earliest_stop < len(response):
-                response = response[:earliest_stop].strip()
-            
-            # Now extract SQL
-            lines = response.split('\n')
-            sql_lines = []
-            capturing = False
-            
-            for line in lines:
-                line = line.strip()
-                
-                # Skip empty lines and comments
-                if not line or line.startswith('--'):
-                    continue
-                
-                # Start capturing when we see SELECT, WITH, INSERT, UPDATE, DELETE
-                if any(keyword in line.upper() for keyword in ['SELECT', 'WITH', 'INSERT', 'UPDATE', 'DELETE']):
-                    capturing = True
-                
-                if capturing:
-                    # Stop if we hit conversational text
-                    if any(phrase in line.lower() for phrase in stop_patterns):
-                        break
-                    
-                    sql_lines.append(line)
-                    
-                    # Stop at semicolon
-                    if line.endswith(';'):
-                        break
-            
-            if sql_lines:
-                sql_result = '\n'.join(sql_lines).strip()
-                return self.clean_sql_query(sql_result)
+            select_pos = response.upper().find("SELECT")
+            after_select = response[select_pos:]
+            semicolon_pos = after_select.find(';')
+            if semicolon_pos != -1:
+                sql = after_select[:semicolon_pos + 1]
+                return self.clean_sql_query(sql)
         
-        # Method 4: Use regex to extract SQL patterns - stop at first semicolon
-        sql_pattern = r'((?:SELECT|WITH|INSERT|UPDATE|DELETE).*?;)'
-        matches = re.findall(sql_pattern, response, re.IGNORECASE | re.DOTALL)
-        if matches:
-            sql_query = matches[0].strip()
-            return self.clean_sql_query(sql_query)
-        
-        # Return empty string if no SQL found
         return ""
     
     def clean_sql_query(self, sql_query: str) -> str:
-        """Clean and validate the extracted SQL query - return only SQL"""
-        
-        # Remove any remaining conversational text
-        lines = sql_query.split('\n')
-        clean_lines = []
-        
-        for line in lines:
-            line = line.strip()
-            # Skip lines that look like conversational text or are empty
-            if not line:
-                continue
-                
-            # Skip obvious conversational lines
-            if any(phrase in line.lower() for phrase in [
-                'assistant:', 'i\'m happy', 'however,', 'it seems', 'could you',
-                'rephrase', 'provide more', 'better understand', 'note:', 'explanation:',
-                'here is', 'here\'s', 'let me', 'would you', 'please', 'sorry',
-                'apologize', 'understand', 'help you', 'question', 'context'
-            ]):
-                break
-            
-            # Only add lines that look like SQL
-            if (line.upper().startswith(('SELECT', 'FROM', 'WHERE', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 
-                                      'GROUP', 'ORDER', 'HAVING', 'UNION', 'WITH', 'INSERT', 
-                                      'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP')) or
-                line.strip().endswith((',', ';')) or
-                any(keyword in line.upper() for keyword in [' AS ', ' ON ', ' AND ', ' OR ', ' IN ', ' NOT '])):
-                clean_lines.append(line)
-            elif clean_lines:  # If we've started collecting SQL and hit non-SQL, stop
-                break
-        
-        if not clean_lines:
+        """Simplified SQL cleaning"""
+        lines = [line.strip() for line in sql_query.split('\n') if line.strip()]
+        if not lines:
             return ""
         
-        cleaned_sql = '\n'.join(clean_lines).strip()
+        # Keep only SQL-looking lines
+        sql_lines = []
+        for line in lines:
+            if (line.upper().startswith(('SELECT', 'FROM', 'WHERE', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 
+                                      'GROUP', 'ORDER', 'HAVING', 'UNION', 'WITH')) or
+                any(keyword in line.upper() for keyword in [' AS ', ' ON ', ' AND ', ' OR '])):
+                sql_lines.append(line)
         
-        # Remove leading semicolons
-        while cleaned_sql.startswith(';'):
-            cleaned_sql = cleaned_sql[1:].strip()
+        if not sql_lines:
+            return sql_query.strip()
         
-        # Ensure it ends with semicolon if it doesn't already
-        if cleaned_sql and not cleaned_sql.endswith(';'):
-            cleaned_sql += ';'
-        
-        return cleaned_sql
+        result = '\n'.join(sql_lines).strip()
+        return result + ';' if result and not result.endswith(';') else result
     
-    def generate_sql(self, question: str, max_tokens: int = 150, temperature: float = 0.0) -> str:
-        """Generate T-SQL query from natural language question - return only SQL"""
+    def generate_sql(self, question: str) -> str:
+        """Highly optimized SQL generation"""
+        start_time = time.time()
         
         try:
-            # Create prompt
+            # Create optimized prompt
             prompt = self.create_prompt(question)
             
-            # Tokenize input
+            # Optimized tokenization with reduced max length
             inputs = self.tokenizer(
                 prompt, 
                 return_tensors="pt", 
                 truncation=True, 
-                max_length=2048,
+                max_length=1024,  # Reduced from 2048
                 padding=False
             )
             
-            # Move inputs to the same device as model
+            # Move to device efficiently
             model_device = next(self.model.parameters()).device
             inputs = {k: v.to(model_device, non_blocking=True) for k, v in inputs.items()}
             
-            # Generation settings - very restrictive to get only SQL
+            # Highly optimized generation parameters
             generation_kwargs = {
-                "max_new_tokens": max_tokens,  # Very limited tokens
-                "temperature": temperature,    # No randomness
-                "do_sample": False,           # Deterministic output
+                "max_new_tokens": 80,     # Reduced from 150
+                "temperature": 0.0,       # Deterministic
+                "do_sample": False,       # No sampling
                 "pad_token_id": self.tokenizer.eos_token_id,
                 "eos_token_id": self.tokenizer.eos_token_id,
-                "repetition_penalty": 1.0,   # No penalty to avoid weird behavior
-                "early_stopping": True,
                 "use_cache": True,
-                "num_beams": 1,
+                "num_beams": 1,          # No beam search
+                "early_stopping": True,
+                "repetition_penalty": 1.0,
             }
             
-            # Generate response
+            # Generate with optimizations
             with torch.no_grad():
                 if torch.cuda.is_available():
-                    with torch.amp.autocast('cuda'):
+                    # Use autocast for faster inference
+                    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                         outputs = self.model.generate(**inputs, **generation_kwargs)
                 else:
                     outputs = self.model.generate(**inputs, **generation_kwargs)
             
-            # Move output back to CPU for decoding if needed
-            if torch.cuda.is_available():
-                outputs = outputs.cpu()
+            # Efficient decoding
+            generated_text = self.tokenizer.decode(
+                outputs[0][len(inputs['input_ids'][0]):], 
+                skip_special_tokens=True
+            )
             
-            # Decode response
-            generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            # Extract SQL
+            sql_query = self.extract_sql_from_response(generated_text)
             
-            # Extract the new content (remove the prompt part)
-            new_content = generated_text[len(prompt):].strip()
-            
-            # Extract SQL from the generated text
-            sql_query = self.extract_sql_from_response(new_content)
-            
-            # Clear GPU cache after generation
+            # Clear cache
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            return sql_query if sql_query else ""
+            end_time = time.time()
+            logger.info(f"SQL generation took {end_time - start_time:.2f} seconds")
+            
+            return sql_query
             
         except Exception as e:
-            # Clear GPU cache on error
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             logger.error(f"Error generating SQL: {str(e)}")
@@ -381,12 +315,7 @@ Generate a T-SQL query to answer this question: `{question}`. Return only the SQ
 def execute_sql_via_api(sql_query: str):
     """Execute SQL query by calling the API endpoint"""
     try:
-        # Prepare the request payload
-        payload = {
-            "query": sql_query
-        }
-        
-        # Make API call
+        payload = {"query": sql_query}
         response = requests.post(
             API_ENDPOINT,
             json=payload,
@@ -394,10 +323,8 @@ def execute_sql_via_api(sql_query: str):
             timeout=30
         )
         
-        # Check if request was successful
         if response.status_code == 200:
-            result = response.json()
-            return result
+            return response.json()
         else:
             return {
                 "success": False,
@@ -405,40 +332,44 @@ def execute_sql_via_api(sql_query: str):
             }
             
     except requests.exceptions.RequestException as e:
-        return {
-            "success": False,
-            "error": f"API connection error: {str(e)}"
-        }
+        return {"success": False, "error": f"API connection error: {str(e)}"}
     except Exception as e:
-        return {
-            "success": False,
-            "error": f"Unexpected error: {str(e)}"
-        }
+        return {"success": False, "error": f"Unexpected error: {str(e)}"}
 
 def process_question(sql_generator, question: str):
-    """Process a natural language question: generate SQL and execute it via API"""
+    """Process a natural language question with timing"""
     print(f"\nQuestion: {question}")
     print("-" * 50)
     
+    total_start = time.time()
+    
     # Generate SQL
     print("Generating SQL query...")
+    sql_start = time.time()
     sql_query = sql_generator.generate_sql(question)
+    sql_end = time.time()
     
     if not sql_query:
         print("Failed to generate SQL query")
         return
     
-    print(f"Generated SQL:\n{sql_query}")
+    print(f"Generated SQL (took {sql_end - sql_start:.2f}s):\n{sql_query}")
     print("-" * 30)
     
     # Execute via API
     print("Executing SQL via API...")
+    api_start = time.time()
     result = execute_sql_via_api(sql_query)
+    api_end = time.time()
+    
+    total_end = time.time()
+    
+    print(f"API execution took {api_end - api_start:.2f}s")
+    print(f"Total processing time: {total_end - total_start:.2f}s")
     
     if result.get("success"):
         print("Query executed successfully!")
         
-        # Check if we have data (SELECT query result)
         if result.get("data") is not None:
             data = result.get("data", [])
             columns = result.get("columns", [])
@@ -451,59 +382,52 @@ def process_question(sql_generator, question: str):
                 print("\nQuery Results:")
                 print("=" * 40)
                 
-                # Print column headers
                 if columns:
                     header = " | ".join(str(col) for col in columns)
                     print(header)
                     print("-" * len(header))
                 
-                # Print data rows
-                for i, row in enumerate(data):
-                    if i < 10:  # Show first 10 rows
-                        if isinstance(row, dict):
-                            row_values = [str(row.get(col, '')) for col in columns] if columns else [str(v) for v in row.values()]
-                            print(" | ".join(row_values))
-                        else:
-                            print(str(row))
+                for i, row in enumerate(data[:5]):  # Show only first 5 rows
+                    if isinstance(row, dict):
+                        row_values = [str(row.get(col, '')) for col in columns] if columns else [str(v) for v in row.values()]
+                        print(" | ".join(row_values))
+                    else:
+                        print(str(row))
                     
-                if len(data) > 10:
-                    print(f"... and {len(data) - 10} more rows")
+                if len(data) > 5:
+                    print(f"... and {len(data) - 5} more rows")
             else:
                 print("No data returned (empty result set)")
                 
         else:
-            # Non-SELECT query (INSERT, UPDATE, DELETE, etc.)
             rows_affected = result.get("row_count", 0)
-            if rows_affected >= 0:
-                print(f"Query executed successfully. Rows affected: {rows_affected}")
-            else:
-                print("Query executed successfully.")
+            print(f"Query executed successfully. Rows affected: {rows_affected}")
     else:
         print(f"Query execution failed: {result.get('error', 'Unknown error')}")
     
     print("=" * 60)
 
 def main():
-    """Main function to run the SQL generator with API execution"""
+    """Main function with optimized initialization"""
+    print("Initializing optimized SQL Generator...")
+    init_start = time.time()
     
-    # Initialize the SQL generator
     try:
-        print("Initializing SQL Generator...")
         sql_generator = SQLGenerator()
-        print("SQL Generator ready!")
+        init_end = time.time()
+        print(f"SQL Generator ready! (Initialization took {init_end - init_start:.2f}s)")
     except Exception as e:
         print(f"Failed to initialize SQL generator: {e}")
         return
     
     print(f"\nAPI Endpoint: {API_ENDPOINT}")
     print("=" * 60)
-    print("Natural Language to SQL Query Generator with API Execution")
+    print("Optimized Natural Language to SQL Query Generator")
     print("=" * 60)
     print("Enter your questions (type 'quit' to exit):")
     
     while True:
         try:
-            # Get user input
             question = input("\nYour question: ").strip()
             
             if question.lower() in ['quit', 'exit', 'q']:
@@ -513,7 +437,6 @@ def main():
             if not question:
                 continue
             
-            # Process the question
             process_question(sql_generator, question)
             
         except KeyboardInterrupt:
@@ -521,33 +444,7 @@ def main():
             break
         except Exception as e:
             logger.error(f"Error in main loop: {str(e)}")
-            print(f" Error: {str(e)}")
-
-def test_sample_questions():
-    """Test with sample questions"""
-    
-    print("Testing with sample questions...")
-    
-    try:
-        sql_generator = SQLGenerator()
-    except Exception as e:
-        print(f"Failed to initialize SQL generator: {e}")
-        return
-    
-    sample_questions = [
-        "How many policies are there?",
-        "What are the total claims by status?",
-        "Show me the top 5 policies by premium amount",
-        "Count the number of open claims"
-    ]
-    
-    for question in sample_questions:
-        process_question(sql_generator, question)
-        print("\n" + "="*60)
+            print(f"Error: {str(e)}")
 
 if __name__ == "__main__":
-    # Run interactive mode
     main()
-    
-    # Uncomment below to run tests instead
-    # test_sample_questions()
