@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import requests
 import json
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import logging
 import time
@@ -20,6 +20,13 @@ app = FastAPI(title="SQL Query Generator with LLM Analysis", version="1.0.0")
 
 # API endpoint configuration
 API_ENDPOINT = "http://172.200.64.182:7860/execute"
+
+# File path configuration
+SAVE_PATH = "/home/text_sql"
+SINGLE_FILE_PATH = os.path.join(SAVE_PATH, "query_results.txt")
+
+# Ensure directory exists
+os.makedirs(SAVE_PATH, exist_ok=True)
 
 # Check GPU availability and set device
 if torch.cuda.is_available():
@@ -108,27 +115,25 @@ class QueryResponse(BaseModel):
 
 class SQLGenerator:
     def __init__(self):
-        self.sql_model = None
-        self.sql_tokenizer = None
-        self.analysis_pipeline = None
-        self.sql_model_name = "defog/llama-3-sqlcoder-8b"
-        self.analysis_model_name = "microsoft/DialoGPT-medium"  # Lighter model for analysis
-        self.load_models()
+        self.model = None
+        self.tokenizer = None
+        self.model_name = "defog/llama-3-sqlcoder-8b"
+        self.load_model()
         
         # Cache for tokenized prompts
         self._prompt_cache = {}
     
-    def load_models(self):
-        """Load both SQL generation and analysis models"""
+    def load_model(self):
+        """Load the LLM model for both SQL generation and analysis"""
         try:
-            logger.info("Loading SQL generation model...")
+            logger.info("Loading LLM model...")
             
-            # Load SQL tokenizer and model
-            self.sql_tokenizer = AutoTokenizer.from_pretrained(self.sql_model_name)
+            # Load tokenizer and model
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             
             if torch.cuda.is_available():
-                self.sql_model = AutoModelForCausalLM.from_pretrained(
-                    self.sql_model_name,
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name,
                     trust_remote_code=True,
                     torch_dtype=torch.bfloat16,
                     load_in_8bit=True,
@@ -137,8 +142,8 @@ class SQLGenerator:
                     low_cpu_mem_usage=True,
                 )
             else:
-                self.sql_model = AutoModelForCausalLM.from_pretrained(
-                    self.sql_model_name,
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name,
                     trust_remote_code=True,
                     torch_dtype=torch.float32,
                     device_map="cpu",
@@ -146,34 +151,9 @@ class SQLGenerator:
                     low_cpu_mem_usage=True,
                 )
             
-            # Set pad token for SQL model
-            if self.sql_tokenizer.pad_token is None:
-                self.sql_tokenizer.pad_token = self.sql_tokenizer.eos_token
-            
-            logger.info("Loading analysis model...")
-            
-            # Load analysis model using pipeline for easier text generation
-            if torch.cuda.is_available():
-                self.analysis_pipeline = pipeline(
-                    "text-generation",
-                    model="microsoft/DialoGPT-medium",
-                    tokenizer="microsoft/DialoGPT-medium",
-                    device=0,
-                    torch_dtype=torch.float16,
-                    max_length=512,
-                    do_sample=True,
-                    temperature=0.7
-                )
-            else:
-                self.analysis_pipeline = pipeline(
-                    "text-generation",
-                    model="microsoft/DialoGPT-medium",
-                    tokenizer="microsoft/DialoGPT-medium",
-                    device=-1,
-                    max_length=512,
-                    do_sample=True,
-                    temperature=0.7
-                )
+            # Set pad token
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
             
             # GPU optimizations
             if torch.cuda.is_available():
@@ -181,10 +161,10 @@ class SQLGenerator:
                 torch.backends.cudnn.enabled = True
                 torch.cuda.empty_cache()
                 
-            logger.info("Both models loaded successfully!")
+            logger.info("Model loaded successfully!")
             
         except Exception as e:
-            logger.error(f"Failed to load models: {str(e)}")
+            logger.error(f"Failed to load model: {str(e)}")
             raise e
     
     @lru_cache(maxsize=128)
@@ -198,6 +178,29 @@ Generate T-SQL for: {question}
 
 ### SQL
 ```sql"""
+        return prompt
+    
+    def create_analysis_prompt(self, question: str, sql_query: str, sql_result: dict) -> str:
+        """Create prompt for analysis generation"""
+        prompt = f"""### Task
+Analyze the following SQL query results and provide insights.
+
+### Question
+{question}
+
+### SQL Query
+{sql_query}
+
+### Results
+{json.dumps(sql_result, indent=2, default=str)[:1000]}
+
+### Analysis
+Please provide a clear analysis including:
+1. What the data shows
+2. Key insights
+3. Summary of findings
+
+Analysis:"""
         return prompt
     
     def extract_sql_from_response(self, response: str) -> str:
@@ -222,6 +225,24 @@ Generate T-SQL for: {question}
         
         return ""
     
+    def extract_analysis_from_response(self, response: str, prompt: str) -> str:
+        """Extract analysis from model response"""
+        response = response.strip()
+        if not response:
+            return "Analysis could not be generated."
+        
+        # Remove the original prompt from the response
+        if prompt in response:
+            analysis = response.replace(prompt, "").strip()
+        else:
+            analysis = response
+        
+        # Clean up the analysis
+        if analysis.startswith("Analysis:"):
+            analysis = analysis[9:].strip()
+        
+        return analysis if analysis else "Analysis could not be generated."
+    
     def clean_sql_query(self, sql_query: str) -> str:
         """Clean and format SQL query"""
         lines = [line.strip() for line in sql_query.split('\n') if line.strip()]
@@ -241,88 +262,66 @@ Generate T-SQL for: {question}
         result = '\n'.join(sql_lines).strip()
         return result + ';' if result and not result.endswith(';') else result
     
-    def generate_sql(self, question: str) -> str:
-        """Generate SQL query from natural language question"""
+    def generate_text(self, prompt: str, max_new_tokens: int = 80, temperature: float = 0.0) -> str:
+        """Generate text using the LLM model"""
         try:
-            prompt = self.create_sql_prompt(question)
-            
-            inputs = self.sql_tokenizer(
+            inputs = self.tokenizer(
                 prompt, 
                 return_tensors="pt", 
                 truncation=True, 
-                max_length=1024,
+                max_length=2048,
                 padding=False
             )
             
-            model_device = next(self.sql_model.parameters()).device
+            model_device = next(self.model.parameters()).device
             inputs = {k: v.to(model_device, non_blocking=True) for k, v in inputs.items()}
             
             generation_kwargs = {
-                "max_new_tokens": 80,
-                "temperature": 0.0,
-                "do_sample": False,
-                "pad_token_id": self.sql_tokenizer.eos_token_id,
-                "eos_token_id": self.sql_tokenizer.eos_token_id,
+                "max_new_tokens": max_new_tokens,
+                "temperature": temperature,
+                "do_sample": temperature > 0,
+                "pad_token_id": self.tokenizer.eos_token_id,
+                "eos_token_id": self.tokenizer.eos_token_id,
                 "use_cache": True,
-                "num_beams": 1,
+                "num_beams": 1 if temperature == 0 else None,
                 "early_stopping": True,
             }
             
             with torch.no_grad():
                 if torch.cuda.is_available():
                     with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                        outputs = self.sql_model.generate(**inputs, **generation_kwargs)
+                        outputs = self.model.generate(**inputs, **generation_kwargs)
                 else:
-                    outputs = self.sql_model.generate(**inputs, **generation_kwargs)
+                    outputs = self.model.generate(**inputs, **generation_kwargs)
             
-            generated_text = self.sql_tokenizer.decode(
+            generated_text = self.tokenizer.decode(
                 outputs[0][len(inputs['input_ids'][0]):], 
                 skip_special_tokens=True
             )
             
-            sql_query = self.extract_sql_from_response(generated_text)
-            
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            return sql_query
+            return generated_text
             
         except Exception as e:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            logger.error(f"Error generating SQL: {str(e)}")
+            logger.error(f"Error generating text: {str(e)}")
             return ""
+    
+    def generate_sql(self, question: str) -> str:
+        """Generate SQL query from natural language question"""
+        prompt = self.create_sql_prompt(question)
+        generated_text = self.generate_text(prompt, max_new_tokens=80, temperature=0.0)
+        return self.extract_sql_from_response(generated_text)
     
     def analyze_results(self, question: str, sql_query: str, sql_result: dict) -> str:
         """Use LLM to analyze SQL results and provide insights"""
         try:
-            # Create analysis prompt
-            analysis_prompt = f"""Question: {question}
-SQL Query: {sql_query}
-Results: {json.dumps(sql_result, indent=2, default=str)[:1000]}
-
-Please provide a clear analysis of these results, including:
-1. What the data shows
-2. Key insights
-3. Summary of findings
-
-Analysis:"""
-            
-            # Generate analysis using the pipeline
-            response = self.analysis_pipeline(
-                analysis_prompt,
-                max_new_tokens=200,
-                num_return_sequences=1,
-                pad_token_id=self.analysis_pipeline.tokenizer.eos_token_id
-            )
-            
-            if response and len(response) > 0:
-                generated_text = response[0]['generated_text']
-                # Extract only the new text after the prompt
-                analysis = generated_text[len(analysis_prompt):].strip()
-                return analysis if analysis else "Analysis could not be generated."
-            else:
-                return "Analysis could not be generated."
+            prompt = self.create_analysis_prompt(question, sql_query, sql_result)
+            generated_text = self.generate_text(prompt, max_new_tokens=300, temperature=0.7)
+            return self.extract_analysis_from_response(generated_text, prompt)
                 
         except Exception as e:
             logger.error(f"Error analyzing results: {str(e)}")
@@ -352,41 +351,61 @@ def execute_sql_via_api(sql_query: str):
     except Exception as e:
         return {"success": False, "error": f"Unexpected error: {str(e)}"}
 
-def save_to_files(sql_query: str, sql_result: dict, llm_analysis: str, question: str) -> dict:
-    """Save SQL and analysis results to files"""
+def append_to_single_file(sql_query: str, sql_result: dict, llm_analysis: str, question: str) -> dict:
+    """Append query results to the single file"""
     try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Save SQL result
-        sql_filename = f"sql_{timestamp}.txt"
-        with open(sql_filename, 'w', encoding='utf-8') as f:
-            f.write(f"Question: {question}\n")
-            f.write(f"Generated SQL Query:\n{sql_query}\n\n")
-            f.write("SQL Execution Result:\n")
-            f.write(json.dumps(sql_result, indent=2, default=str))
+        # Prepare content to append
+        content = f"""
+{'='*80}
+QUERY EXECUTED AT: {timestamp}
+{'='*80}
+
+QUESTION: {question}
+
+GENERATED SQL QUERY:
+{sql_query}
+
+SQL EXECUTION RESULT:
+{json.dumps(sql_result, indent=2, default=str)}
+
+LLM ANALYSIS:
+{llm_analysis}
+
+{'='*80}
+
+"""
         
-        # Save LLM analysis
-        response_filename = f"response_{timestamp}.txt"
-        with open(response_filename, 'w', encoding='utf-8') as f:
-            f.write(f"Question: {question}\n\n")
-            f.write(f"SQL Query:\n{sql_query}\n\n")
-            f.write("LLM Analysis:\n")
-            f.write(llm_analysis)
+        # Append to the single file
+        with open(SINGLE_FILE_PATH, 'a', encoding='utf-8') as f:
+            f.write(content)
         
         return {
-            "sql_file": sql_filename,
-            "response_file": response_filename,
-            "saved_successfully": True
+            "file_path": SINGLE_FILE_PATH,
+            "saved_successfully": True,
+            "timestamp": timestamp
         }
         
     except Exception as e:
-        logger.error(f"Error saving files: {str(e)}")
+        logger.error(f"Error saving to file: {str(e)}")
         return {
-            "sql_file": None,
-            "response_file": None,
+            "file_path": None,
             "saved_successfully": False,
             "error": str(e)
         }
+
+def clear_single_file():
+    """Clear the single file content (called on API initialization)"""
+    try:
+        with open(SINGLE_FILE_PATH, 'w', encoding='utf-8') as f:
+            f.write(f"SQL Query Results Log - Initialized at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("="*80 + "\n\n")
+        logger.info(f"Cleared and initialized file: {SINGLE_FILE_PATH}")
+        return True
+    except Exception as e:
+        logger.error(f"Error clearing file: {str(e)}")
+        return False
 
 # Initialize the SQL generator globally
 sql_generator = None
@@ -397,6 +416,10 @@ async def startup_event():
     global sql_generator
     logger.info("Initializing SQL Generator...")
     try:
+        # Clear the single file on startup
+        clear_single_file()
+        
+        # Initialize the SQL generator
         sql_generator = SQLGenerator()
         logger.info("SQL Generator initialized successfully!")
     except Exception as e:
@@ -430,8 +453,8 @@ async def process_query(request: QueryRequest):
         # Generate LLM analysis
         llm_analysis = sql_generator.analyze_results(request.question, sql_query, sql_result)
         
-        # Save to files
-        files_info = save_to_files(sql_query, sql_result, llm_analysis, request.question)
+        # Save to single file
+        files_info = append_to_single_file(sql_query, sql_result, llm_analysis, request.question)
         
         end_time = time.time()
         processing_time = end_time - start_time
@@ -460,8 +483,19 @@ async def health_check():
         "sql_generator_ready": sql_generator is not None,
         "gpu_available": torch.cuda.is_available(),
         "device_info": str(device),
-        "api_endpoint": API_ENDPOINT
+        "api_endpoint": API_ENDPOINT,
+        "save_path": SAVE_PATH,
+        "single_file_path": SINGLE_FILE_PATH
     }
+
+@app.post("/clear-log")
+async def clear_log():
+    """Manually clear the log file"""
+    success = clear_single_file()
+    if success:
+        return {"message": "Log file cleared successfully", "file_path": SINGLE_FILE_PATH}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to clear log file")
 
 if __name__ == "__main__":
     import uvicorn
