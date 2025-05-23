@@ -11,6 +11,7 @@ import os
 from datetime import datetime
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from typing import Tuple, Dict, Any
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -313,7 +314,7 @@ Analysis:"""
             logger.error(f"Error generating text: {str(e)}")
             return ""
     
-    def generate_sql(self, question: str) -> tuple[str, float]:
+    def generate_sql(self, question: str) -> Tuple[str, float]:
         """Generate SQL query from natural language question with timing"""
         start_time = time.time()
         prompt = self.create_sql_prompt(question)
@@ -326,7 +327,7 @@ Analysis:"""
         
         return sql_query, generation_time
     
-    def analyze_results(self, question: str, sql_query: str, sql_result: dict) -> tuple[str, float]:
+    def analyze_results(self, question: str, sql_query: str, sql_result: dict) -> Tuple[str, float]:
         """Use LLM to analyze SQL results and provide insights with timing"""
         start_time = time.time()
         try:
@@ -346,7 +347,7 @@ Analysis:"""
             logger.error(f"Error analyzing results: {str(e)}")
             return f"Error generating analysis: {str(e)}", analysis_time
 
-def execute_sql_via_api(sql_query: str) -> tuple[dict, float]:
+def execute_sql_via_api(sql_query: str) -> Tuple[Dict[str, Any], float]:
     """Execute SQL query by calling the API endpoint with timing"""
     start_time = time.time()
     try:
@@ -385,7 +386,7 @@ def execute_sql_via_api(sql_query: str) -> tuple[dict, float]:
 
 def append_to_single_file(sql_query: str, sql_result: dict, llm_analysis: str, question: str, 
                          sql_generation_time: float, llm_analysis_time: float, 
-                         sql_execution_time: float, total_time: float) -> dict:
+                         sql_execution_time: float, total_time: float) -> Dict[str, Any]:
     """Append query results to the single file with timing information"""
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
