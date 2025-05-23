@@ -110,7 +110,10 @@ class QueryResponse(BaseModel):
     generated_sql: str
     sql_execution_result: dict
     llm_analysis: str
-    processing_time: float
+    sql_generation_time: float
+    llm_analysis_time: float
+    sql_execution_time: float
+    total_processing_time: float
     files_saved: dict
 
 class SQLGenerator:
@@ -310,25 +313,42 @@ Analysis:"""
             logger.error(f"Error generating text: {str(e)}")
             return ""
     
-    def generate_sql(self, question: str) -> str:
-        """Generate SQL query from natural language question"""
+    def generate_sql(self, question: str) -> tuple[str, float]:
+        """Generate SQL query from natural language question with timing"""
+        start_time = time.time()
         prompt = self.create_sql_prompt(question)
         generated_text = self.generate_text(prompt, max_new_tokens=80, temperature=0.0)
-        return self.extract_sql_from_response(generated_text)
+        sql_query = self.extract_sql_from_response(generated_text)
+        end_time = time.time()
+        
+        generation_time = end_time - start_time
+        logger.info(f"SQL generation completed in {generation_time:.3f} seconds")
+        
+        return sql_query, generation_time
     
-    def analyze_results(self, question: str, sql_query: str, sql_result: dict) -> str:
-        """Use LLM to analyze SQL results and provide insights"""
+    def analyze_results(self, question: str, sql_query: str, sql_result: dict) -> tuple[str, float]:
+        """Use LLM to analyze SQL results and provide insights with timing"""
+        start_time = time.time()
         try:
             prompt = self.create_analysis_prompt(question, sql_query, sql_result)
             generated_text = self.generate_text(prompt, max_new_tokens=300, temperature=0.7)
-            return self.extract_analysis_from_response(generated_text, prompt)
+            analysis = self.extract_analysis_from_response(generated_text, prompt)
+            end_time = time.time()
+            
+            analysis_time = end_time - start_time
+            logger.info(f"LLM analysis completed in {analysis_time:.3f} seconds")
+            
+            return analysis, analysis_time
                 
         except Exception as e:
+            end_time = time.time()
+            analysis_time = end_time - start_time
             logger.error(f"Error analyzing results: {str(e)}")
-            return f"Error generating analysis: {str(e)}"
+            return f"Error generating analysis: {str(e)}", analysis_time
 
-def execute_sql_via_api(sql_query: str):
-    """Execute SQL query by calling the API endpoint"""
+def execute_sql_via_api(sql_query: str) -> tuple[dict, float]:
+    """Execute SQL query by calling the API endpoint with timing"""
+    start_time = time.time()
     try:
         payload = {"query": sql_query}
         response = requests.post(
@@ -338,21 +358,35 @@ def execute_sql_via_api(sql_query: str):
             timeout=30
         )
         
+        end_time = time.time()
+        execution_time = end_time - start_time
+        
         if response.status_code == 200:
-            return response.json()
+            result = response.json()
+            logger.info(f"SQL execution completed in {execution_time:.3f} seconds")
+            return result, execution_time
         else:
-            return {
+            error_result = {
                 "success": False,
                 "error": f"API request failed with status {response.status_code}: {response.text}"
             }
+            return error_result, execution_time
             
     except requests.exceptions.RequestException as e:
-        return {"success": False, "error": f"API connection error: {str(e)}"}
+        end_time = time.time()
+        execution_time = end_time - start_time
+        error_result = {"success": False, "error": f"API connection error: {str(e)}"}
+        return error_result, execution_time
     except Exception as e:
-        return {"success": False, "error": f"Unexpected error: {str(e)}"}
+        end_time = time.time()
+        execution_time = end_time - start_time
+        error_result = {"success": False, "error": f"Unexpected error: {str(e)}"}
+        return error_result, execution_time
 
-def append_to_single_file(sql_query: str, sql_result: dict, llm_analysis: str, question: str) -> dict:
-    """Append query results to the single file"""
+def append_to_single_file(sql_query: str, sql_result: dict, llm_analysis: str, question: str, 
+                         sql_generation_time: float, llm_analysis_time: float, 
+                         sql_execution_time: float, total_time: float) -> dict:
+    """Append query results to the single file with timing information"""
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
@@ -363,6 +397,12 @@ QUERY EXECUTED AT: {timestamp}
 {'='*80}
 
 QUESTION: {question}
+
+PERFORMANCE METRICS:
+- SQL Generation Time: {sql_generation_time:.3f} seconds
+- SQL Execution Time: {sql_execution_time:.3f} seconds
+- LLM Analysis Time: {llm_analysis_time:.3f} seconds
+- Total Processing Time: {total_time:.3f} seconds
 
 GENERATED SQL QUERY:
 {sql_query}
@@ -433,31 +473,40 @@ async def root():
 
 @app.post("/query", response_model=QueryResponse)
 async def process_query(request: QueryRequest):
-    """Process natural language question and return SQL + analysis"""
+    """Process natural language question and return SQL + analysis with detailed timing"""
     if not sql_generator:
         raise HTTPException(status_code=500, detail="SQL generator not initialized")
     
-    start_time = time.time()
+    total_start_time = time.time()
     
     try:
-        # Generate SQL query
+        # Generate SQL query with timing
         logger.info(f"Processing question: {request.question}")
-        sql_query = sql_generator.generate_sql(request.question)
+        sql_query, sql_generation_time = sql_generator.generate_sql(request.question)
         
         if not sql_query:
             raise HTTPException(status_code=400, detail="Failed to generate SQL query")
         
-        # Execute SQL query
-        sql_result = execute_sql_via_api(sql_query)
+        # Execute SQL query with timing
+        sql_result, sql_execution_time = execute_sql_via_api(sql_query)
         
-        # Generate LLM analysis
-        llm_analysis = sql_generator.analyze_results(request.question, sql_query, sql_result)
+        # Generate LLM analysis with timing
+        llm_analysis, llm_analysis_time = sql_generator.analyze_results(request.question, sql_query, sql_result)
         
-        # Save to single file
-        files_info = append_to_single_file(sql_query, sql_result, llm_analysis, request.question)
+        total_end_time = time.time()
+        total_processing_time = total_end_time - total_start_time
         
-        end_time = time.time()
-        processing_time = end_time - start_time
+        # Log timing summary
+        logger.info(f"Timing Summary - SQL Gen: {sql_generation_time:.3f}s, "
+                   f"SQL Exec: {sql_execution_time:.3f}s, "
+                   f"LLM Analysis: {llm_analysis_time:.3f}s, "
+                   f"Total: {total_processing_time:.3f}s")
+        
+        # Save to single file with timing information
+        files_info = append_to_single_file(
+            sql_query, sql_result, llm_analysis, request.question,
+            sql_generation_time, llm_analysis_time, sql_execution_time, total_processing_time
+        )
         
         return QueryResponse(
             success=True,
@@ -465,7 +514,10 @@ async def process_query(request: QueryRequest):
             generated_sql=sql_query,
             sql_execution_result=sql_result,
             llm_analysis=llm_analysis,
-            processing_time=processing_time,
+            sql_generation_time=sql_generation_time,
+            llm_analysis_time=llm_analysis_time,
+            sql_execution_time=sql_execution_time,
+            total_processing_time=total_processing_time,
             files_saved=files_info
         )
         
