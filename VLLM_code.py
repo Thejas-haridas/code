@@ -158,8 +158,8 @@ class OptimizedSQLGenerator:
             "max_model_len": 2048,  # Reasonable context length
             "gpu_memory_utilization": 0.85,  # Use most of GPU memory
             "swap_space": 4,  # GB of swap space for CPU offloading
-            "max_parallel_seqs": 16,  # Number of sequences to process in parallel
-            "max_paddings": 256,  # Maximum padding tokens
+            # "max_parallel_seqs": 16,  # Removed - not supported in this version
+            # "max_paddings": 256,  # Removed - not supported in this version
         }
         
         # Override with user-provided kwargs
@@ -172,7 +172,6 @@ class OptimizedSQLGenerator:
             
             # Print model info
             print(f"🤖 Model: {self.model_name}")
-            print(f"📊 Max parallel sequences: {vllm_kwargs['max_parallel_seqs']}")
             print(f"💾 GPU memory utilization: {vllm_kwargs['gpu_memory_utilization']*100}%")
             
         except Exception as e:
@@ -191,7 +190,7 @@ class OptimizedSQLGenerator:
             dtype="float16",
             max_model_len=2048,
             gpu_memory_utilization=0.85,
-            max_parallel_seqs=32,  # Higher for async
+            # max_parallel_seqs=32,  # Removed - not supported in this version
             **kwargs
         )
         
@@ -335,7 +334,7 @@ def main():
         
         # Load model with optimizations
         sql_generator.load_model(
-            max_parallel_seqs=8,  # Adjust based on your needs
+            # max_parallel_seqs=8,  # Removed - not supported in this version
             gpu_memory_utilization=0.9,  # Use more GPU memory if available
         )
         
