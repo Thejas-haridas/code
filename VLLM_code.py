@@ -1,10 +1,23 @@
 import time
 import gc
+import os
 from typing import List, Optional
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 import asyncio
+import torch
+
+# Set environment variables to handle compilation issues
+os.environ['TORCH_LOGS'] = "+dynamo"
+os.environ['TORCHDYNAMO_VERBOSE'] = "1"
+
+# Fallback to disable Triton if compilation fails
+def set_fallback_env():
+    """Set environment variables for fallback options"""
+    os.environ['VLLM_USE_TRITON'] = '0'
+    torch._dynamo.config.suppress_errors = True
+    print("🔧 Fallback configuration applied")
 
 # --- 1. Configuration ---
 
@@ -142,41 +155,118 @@ class OptimizedSQLGenerator:
             max_tokens=200,
             stop=["[/SQL]", "\n\n", "```"],  # Stop tokens
             skip_special_tokens=True,
-            # use_beam_search=False,  # Removed - not supported in this vLLM version
         )
     
     def load_model(self, **kwargs):
-        """Load vLLM model with optimized settings"""
+        """Load vLLM model with progressive fallback configurations"""
         print("\n🔄 Loading vLLM model...")
         load_start = time.time()
         
-        # Default vLLM configuration optimized for performance
-        vllm_kwargs = {
-            "model": self.model_name,
-            "tensor_parallel_size": 1,  # Adjust based on your GPU setup
-            "dtype": "float16",  # Use float16 for better performance
-            "max_model_len": 2048,  # Reasonable context length
-            "gpu_memory_utilization": 0.85,  # Use most of GPU memory
-            "swap_space": 4,  # GB of swap space for CPU offloading
-            # "max_parallel_seqs": 16,  # Removed - not supported in this version
-            # "max_paddings": 256,  # Removed - not supported in this version
-        }
+        # Configuration attempts in order of preference
+        configs = [
+            # Config 1: High performance
+            {
+                "model": self.model_name,
+                "tensor_parallel_size": 1,
+                "dtype": "float16",
+                "max_model_len": 2048,
+                "gpu_memory_utilization": 0.8,
+                "swap_space": 4,
+                "trust_remote_code": True,
+                "download_dir": "./model_cache",
+                "name": "High Performance"
+            },
+            # Config 2: Conservative memory
+            {
+                "model": self.model_name,
+                "tensor_parallel_size": 1,
+                "dtype": "float16",
+                "max_model_len": 1024,
+                "gpu_memory_utilization": 0.6,
+                "swap_space": 2,
+                "trust_remote_code": True,
+                "download_dir": "./model_cache",
+                "enforce_eager": True,
+                "name": "Conservative Memory"
+            },
+            # Config 3: Minimal requirements
+            {
+                "model": self.model_name,
+                "tensor_parallel_size": 1,
+                "dtype": "auto",
+                "max_model_len": 512,
+                "gpu_memory_utilization": 0.4,
+                "swap_space": 1,
+                "trust_remote_code": True,
+                "download_dir": "./model_cache",
+                "enforce_eager": True,
+                "disable_custom_all_reduce": True,
+                "name": "Minimal Requirements"
+            },
+            # Config 4: CPU fallback
+            {
+                "model": self.model_name,
+                "tensor_parallel_size": 1,
+                "dtype": "float32",
+                "max_model_len": 512,
+                "gpu_memory_utilization": 0.3,
+                "swap_space": 8,
+                "trust_remote_code": True,
+                "download_dir": "./model_cache",
+                "enforce_eager": True,
+                "disable_custom_all_reduce": True,
+                "device": "cpu",
+                "name": "CPU Fallback"
+            }
+        ]
         
-        # Override with user-provided kwargs
-        vllm_kwargs.update(kwargs)
+        # Try each configuration
+        for i, config in enumerate(configs):
+            config_name = config.pop("name", f"Config {i+1}")
+            
+            # Override with user-provided kwargs
+            final_config = {**config, **kwargs}
+            
+            try:
+                print(f"🔧 Trying {config_name} configuration...")
+                
+                # Apply environment variables for problematic configs
+                if i >= 1:  # Apply fallback settings for configs 2+
+                    set_fallback_env()
+                
+                self.llm = LLM(**final_config)
+                
+                load_time = time.time() - load_start
+                print(f"✅ vLLM model loaded with {config_name} in {load_time:.2f}s")
+                print(f"🤖 Model: {self.model_name}")
+                print(f"💾 GPU memory utilization: {final_config.get('gpu_memory_utilization', 0.8)*100}%")
+                print(f"📏 Max sequence length: {final_config.get('max_model_len', 2048)}")
+                
+                if i > 0:
+                    print(f"⚠️  Running in {config_name.lower()} mode")
+                
+                return  # Success, exit the function
+                
+            except Exception as e:
+                print(f"❌ {config_name} failed: {str(e)[:100]}...")
+                
+                # Clean up any partial initialization
+                if hasattr(self, 'llm') and self.llm is not None:
+                    try:
+                        del self.llm
+                        self.llm = None
+                    except:
+                        pass
+                
+                # Clean up GPU memory
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                # Continue to next configuration
+                continue
         
-        try:
-            self.llm = LLM(**vllm_kwargs)
-            load_time = time.time() - load_start
-            print(f"✅ vLLM model loaded in {load_time:.2f}s")
-            
-            # Print model info
-            print(f"🤖 Model: {self.model_name}")
-            print(f"💾 GPU memory utilization: {vllm_kwargs['gpu_memory_utilization']*100}%")
-            
-        except Exception as e:
-            print(f"❌ Failed to load vLLM model: {e}")
-            raise
+        # If all configurations failed
+        raise RuntimeError(f"Failed to load model with any configuration. Last error: {str(e)}")
     
     async def load_async_model(self, **kwargs):
         """Load async vLLM engine for concurrent processing"""
@@ -189,8 +279,9 @@ class OptimizedSQLGenerator:
             tensor_parallel_size=1,
             dtype="float16",
             max_model_len=2048,
-            gpu_memory_utilization=0.85,
-            # max_parallel_seqs=32,  # Removed - not supported in this version
+            gpu_memory_utilization=0.8,
+            trust_remote_code=True,
+            download_dir="./model_cache",
             **kwargs
         )
         
@@ -199,8 +290,29 @@ class OptimizedSQLGenerator:
             load_time = time.time() - load_start
             print(f"✅ Async vLLM engine loaded in {load_time:.2f}s")
         except Exception as e:
-            print(f"❌ Failed to load async vLLM engine: {e}")
-            raise
+            print(f"⚠️  Async load failed, trying fallback...")
+            set_fallback_env()
+            
+            # Fallback for async
+            fallback_args = AsyncEngineArgs(
+                model=self.model_name,
+                tensor_parallel_size=1,
+                dtype="auto",
+                max_model_len=1024,
+                gpu_memory_utilization=0.6,
+                trust_remote_code=True,
+                download_dir="./model_cache",
+                enforce_eager=True,
+                **kwargs
+            )
+            
+            try:
+                self.async_engine = AsyncLLMEngine.from_engine_args(fallback_args)
+                load_time = time.time() - load_start
+                print(f"✅ Async vLLM engine loaded with fallback in {load_time:.2f}s")
+            except Exception as e2:
+                print(f"❌ Failed to load async vLLM engine: {e2}")
+                raise
     
     def generate_sql(self, user_question: str) -> str:
         """Generate SQL using synchronous vLLM"""
@@ -210,24 +322,29 @@ class OptimizedSQLGenerator:
         print(f"\n🤔 Processing question: '{user_question}'")
         start_time = time.time()
         
-        # Prepare prompt
-        prompt = prompt_cache.make_prompt(user_question)
-        
-        # Generate with vLLM
-        outputs = self.llm.generate([prompt], self.sampling_params)
-        
-        # Extract SQL
-        generated_text = outputs[0].outputs[0].text.strip()
-        sql_query = self._extract_sql(generated_text)
-        
-        # Performance metrics
-        total_time = time.time() - start_time
-        tokens_generated = len(outputs[0].outputs[0].token_ids)
-        tokens_per_second = tokens_generated / total_time if total_time > 0 else 0
-        
-        print(f"⏱️  Generated in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
-        
-        return sql_query
+        try:
+            # Prepare prompt
+            prompt = prompt_cache.make_prompt(user_question)
+            
+            # Generate with vLLM
+            outputs = self.llm.generate([prompt], self.sampling_params)
+            
+            # Extract SQL
+            generated_text = outputs[0].outputs[0].text.strip()
+            sql_query = self._extract_sql(generated_text)
+            
+            # Performance metrics
+            total_time = time.time() - start_time
+            tokens_generated = len(outputs[0].outputs[0].token_ids)
+            tokens_per_second = tokens_generated / total_time if total_time > 0 else 0
+            
+            print(f"⏱️  Generated in {total_time:.2f}s ({tokens_per_second:.1f} tok/s)")
+            
+            return sql_query
+            
+        except Exception as e:
+            print(f"❌ Error during generation: {e}")
+            return f"-- Error generating SQL: {str(e)}"
     
     def generate_sql_batch(self, questions: List[str]) -> List[str]:
         """Generate SQL for multiple questions in a single batch"""
@@ -237,29 +354,34 @@ class OptimizedSQLGenerator:
         print(f"\n📦 Processing batch of {len(questions)} questions...")
         start_time = time.time()
         
-        # Prepare prompts
-        prompts = [prompt_cache.make_prompt(q) for q in questions]
-        
-        # Generate batch with vLLM (automatically optimized)
-        outputs = self.llm.generate(prompts, self.sampling_params)
-        
-        # Extract SQL queries
-        sql_queries = []
-        for output in outputs:
-            generated_text = output.outputs[0].text.strip()
-            sql_query = self._extract_sql(generated_text)
-            sql_queries.append(sql_query)
-        
-        # Performance metrics
-        total_time = time.time() - start_time
-        total_tokens = sum(len(output.outputs[0].token_ids) for output in outputs)
-        tokens_per_second = total_tokens / total_time if total_time > 0 else 0
-        throughput = len(questions) / total_time if total_time > 0 else 0
-        
-        print(f"⚡ Batch completed in {total_time:.2f}s")
-        print(f"📈 Throughput: {throughput:.1f} queries/s, {tokens_per_second:.1f} tok/s")
-        
-        return sql_queries
+        try:
+            # Prepare prompts
+            prompts = [prompt_cache.make_prompt(q) for q in questions]
+            
+            # Generate batch with vLLM (automatically optimized)
+            outputs = self.llm.generate(prompts, self.sampling_params)
+            
+            # Extract SQL queries
+            sql_queries = []
+            for output in outputs:
+                generated_text = output.outputs[0].text.strip()
+                sql_query = self._extract_sql(generated_text)
+                sql_queries.append(sql_query)
+            
+            # Performance metrics
+            total_time = time.time() - start_time
+            total_tokens = sum(len(output.outputs[0].token_ids) for output in outputs)
+            tokens_per_second = total_tokens / total_time if total_time > 0 else 0
+            throughput = len(questions) / total_time if total_time > 0 else 0
+            
+            print(f"⚡ Batch completed in {total_time:.2f}s")
+            print(f"📈 Throughput: {throughput:.1f} queries/s, {tokens_per_second:.1f} tok/s")
+            
+            return sql_queries
+            
+        except Exception as e:
+            print(f"❌ Error during batch generation: {e}")
+            return [f"-- Error: {str(e)}" for _ in questions]
     
     async def generate_sql_async(self, questions: List[str]) -> List[str]:
         """Generate SQL asynchronously for maximum concurrency"""
@@ -269,37 +391,42 @@ class OptimizedSQLGenerator:
         print(f"\n🚀 Processing {len(questions)} questions asynchronously...")
         start_time = time.time()
         
-        # Prepare prompts
-        prompts = [prompt_cache.make_prompt(q) for q in questions]
-        
-        # Generate all requests concurrently
-        tasks = []
-        for i, prompt in enumerate(prompts):
-            task = self.async_engine.generate(
-                prompt, 
-                self.sampling_params, 
-                request_id=f"sql_gen_{i}"
-            )
-            tasks.append(task)
-        
-        # Wait for all completions
-        results = await asyncio.gather(*tasks)
-        
-        # Extract SQL queries
-        sql_queries = []
-        for result in results:
-            generated_text = result.outputs[0].text.strip()
-            sql_query = self._extract_sql(generated_text)
-            sql_queries.append(sql_query)
-        
-        # Performance metrics
-        total_time = time.time() - start_time
-        throughput = len(questions) / total_time if total_time > 0 else 0
-        
-        print(f"🚀 Async batch completed in {total_time:.2f}s")
-        print(f"📈 Throughput: {throughput:.1f} queries/s")
-        
-        return sql_queries
+        try:
+            # Prepare prompts
+            prompts = [prompt_cache.make_prompt(q) for q in questions]
+            
+            # Generate all requests concurrently
+            tasks = []
+            for i, prompt in enumerate(prompts):
+                task = self.async_engine.generate(
+                    prompt, 
+                    self.sampling_params, 
+                    request_id=f"sql_gen_{i}"
+                )
+                tasks.append(task)
+            
+            # Wait for all completions
+            results = await asyncio.gather(*tasks)
+            
+            # Extract SQL queries
+            sql_queries = []
+            for result in results:
+                generated_text = result.outputs[0].text.strip()
+                sql_query = self._extract_sql(generated_text)
+                sql_queries.append(sql_query)
+            
+            # Performance metrics
+            total_time = time.time() - start_time
+            throughput = len(questions) / total_time if total_time > 0 else 0
+            
+            print(f"🚀 Async batch completed in {total_time:.2f}s")
+            print(f"📈 Throughput: {throughput:.1f} queries/s")
+            
+            return sql_queries
+            
+        except Exception as e:
+            print(f"❌ Error during async generation: {e}")
+            return [f"-- Error: {str(e)}" for _ in questions]
     
     def _extract_sql(self, generated_text: str) -> str:
         """Extract clean SQL from generated text"""
@@ -322,21 +449,82 @@ class OptimizedSQLGenerator:
 def cleanup_memory():
     """Clean up memory"""
     gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     print("🧹 Memory cleaned up")
+
+def check_system_requirements():
+    """Check system requirements and suggest fixes"""
+    print("🔍 Checking system requirements...")
+    
+    # Check CUDA
+    if torch.cuda.is_available():
+        device_count = torch.cuda.device_count()
+        for i in range(device_count):
+            props = torch.cuda.get_device_properties(i)
+            memory_gb = props.total_memory / 1e9
+            print(f"✅ GPU {i}: {torch.cuda.get_device_name(i)}")
+            print(f"💾 Memory: {memory_gb:.1f} GB")
+            
+            # Check available memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                allocated = torch.cuda.memory_allocated(i) / 1e9
+                cached = torch.cuda.memory_reserved(i) / 1e9
+                free = memory_gb - allocated - cached
+                print(f"🆓 Available: ~{free:.1f} GB")
+                
+                if memory_gb < 4:
+                    print("⚠️  Warning: GPU has less than 4GB memory")
+                    print("💡 Consider using CPU mode or a smaller model")
+                elif memory_gb < 8:
+                    print("⚠️  Warning: GPU memory is limited")
+                    print("💡 Will use conservative memory settings")
+    else:
+        print("⚠️  CUDA not available - will try CPU mode")
+    
+    # Check compiler
+    try:
+        import subprocess
+        result = subprocess.run(['gcc', '--version'], capture_output=True, text=True)
+        if result.returncode == 0:
+            print("✅ GCC compiler available")
+        else:
+            print("⚠️  GCC compiler not found")
+            print("💡 Install with: apt update && apt install -y build-essential")
+    except:
+        print("❌ No C compiler found")
+        print("💡 Install with: apt update && apt install -y build-essential")
+    
+    # Check available RAM
+    try:
+        import psutil
+        memory = psutil.virtual_memory()
+        total_gb = memory.total / 1e9
+        available_gb = memory.available / 1e9
+        print(f"🧠 System RAM: {total_gb:.1f} GB (available: {available_gb:.1f} GB)")
+        
+        if available_gb < 4:
+            print("⚠️  Warning: Low system memory available")
+            print("💡 Close other applications to free memory")
+    except ImportError:
+        print("💡 Install psutil for memory checking: pip install psutil")
+    
+    print()
 
 # --- 5. Main Application ---
 
 def main():
     """Main application with vLLM integration"""
     try:
+        # Check system requirements
+        check_system_requirements()
+        
         # Initialize SQL generator
         sql_generator = OptimizedSQLGenerator()
         
         # Load model with optimizations
-        sql_generator.load_model(
-            # max_parallel_seqs=8,  # Removed - not supported in this version
-            gpu_memory_utilization=0.9,  # Use more GPU memory if available
-        )
+        sql_generator.load_model()
         
         print("\n" + "="*60)
         print("🚀 vLLM SQL Generator Ready!")
