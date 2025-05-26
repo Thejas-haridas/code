@@ -142,7 +142,7 @@ class OptimizedSQLGenerator:
             max_tokens=200,
             stop=["[/SQL]", "\n\n", "```"],  # Stop tokens
             skip_special_tokens=True,
-            use_beam_search=False,  # Greedy decoding for speed
+            # use_beam_search=False,  # Removed - not supported in this vLLM version
         )
     
     def load_model(self, **kwargs):
