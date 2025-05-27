@@ -199,7 +199,7 @@ def make_sql_prompt(question: str) -> str:
     """Creates a structured prompt for SQL generation."""
     return f"""### Task
 Generate a T-SQL query that answers the following question. Use the provided schema.
-Ensure the query is valid for Azure SQL Server.dont use NULLS LAST as its not part of T-SQL
+Ensure the query is valid for Azure SQL Server. Do not use NULLS LAST as it's not part of T-SQL
 
 ### Schema
 {DATABASE_SCHEMA}
@@ -323,7 +323,7 @@ def analyze_results(question: str, sql_query: str, sql_result: dict) -> Tuple[st
     """Generates a natural language analysis using Phi-3-mini."""
     start_time = time.time()
     prompt = make_analysis_prompt(question, sql_query, sql_result)
-            analysis = generate_text_optimized(
+    analysis = generate_text_optimized(
         prompt, 
         app.state.analysis_model, 
         app.state.analysis_tokenizer, 
@@ -420,7 +420,7 @@ async def process_query(request: QueryRequest):
             executor, execute_sql, sql_query
         )
 
-        # 3. Analyze Results using SmolLM
+        # 3. Analyze Results using Phi-3-mini
         llm_analysis, llm_analysis_time = await loop.run_in_executor(
             executor, analyze_results, request.question, sql_query, sql_execution_result
         )
