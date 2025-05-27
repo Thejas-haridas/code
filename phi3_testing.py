@@ -170,16 +170,22 @@ class Phi3ChatBot:
     
     def _generate_response_pipeline(self, messages):
         """Generate response using the pipeline."""
-        response = self.pipe(
-            messages,
-            max_new_tokens=self.max_new_tokens,
-            do_sample=self.do_sample,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            repetition_penalty=self.repetition_penalty,
-            eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.pad_token_id,
-        )
+        generation_kwargs = {
+            "max_new_tokens": self.max_new_tokens,
+            "do_sample": self.do_sample,
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "pad_token_id": self.tokenizer.pad_token_id,
+        }
+        
+        # Add temperature and top_p only if do_sample is True
+        if self.do_sample:
+            generation_kwargs.update({
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "repetition_penalty": self.repetition_penalty,
+            })
+        
+        response = self.pipe(messages, **generation_kwargs)
         
         generated_text_full = response[0]['generated_text']
         
@@ -216,18 +222,35 @@ class Phi3ChatBot:
         # Create attention mask
         attention_mask = encoded_chat.ne(self.tokenizer.pad_token_id).long()
         
+        # Prepare generation kwargs
+        generation_kwargs = {
+            "max_new_tokens": self.max_new_tokens,
+            "num_return_sequences": 1,
+            "do_sample": self.do_sample,
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "use_cache": True,
+        }
+        
+        # Add sampling parameters only if do_sample is True
+        if self.do_sample:
+            generation_kwargs.update({
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "repetition_penalty": self.repetition_penalty,
+            })
+        
+        # Try to disable problematic cache features for compatibility
+        try:
+            generation_kwargs["past_key_values"] = None
+        except:
+            pass
+        
         with torch.no_grad():
             outputs = self.model.generate(
                 encoded_chat,
                 attention_mask=attention_mask,
-                max_new_tokens=self.max_new_tokens,
-                num_return_sequences=1,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                do_sample=self.do_sample,
-                repetition_penalty=self.repetition_penalty,
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
+                **generation_kwargs
             )
         
         generated_response_ids = outputs[0][encoded_chat.shape[1]:]
@@ -244,10 +267,21 @@ class Phi3ChatBot:
         start_time = time.time()
         
         try:
-            if self.pipe:
-                assistant_reply = self._generate_response_pipeline(self.current_messages)
-            else:
+            # Try pipeline first, fallback to manual if it fails
+            try:
+                if self.pipe:
+                    assistant_reply = self._generate_response_pipeline(self.current_messages)
+                else:
+                    assistant_reply = self._generate_response_manual(self.current_messages)
+            except Exception as pipeline_error:
+                print(f"Pipeline method failed: {pipeline_error}")
+                print("Falling back to manual generation...")
                 assistant_reply = self._generate_response_manual(self.current_messages)
+            
+            # Clean up the response
+            assistant_reply = assistant_reply.strip()
+            if not assistant_reply:
+                assistant_reply = "I apologize, but I couldn't generate a proper response. Please try again."
             
             # Add assistant's response to conversation
             self.current_messages.append({"role": "assistant", "content": assistant_reply})
@@ -265,7 +299,46 @@ class Phi3ChatBot:
             
         except Exception as e:
             print(f"Error generating response: {e}")
-            # Remove the user message if generation failed
+            print("This might be due to model compatibility issues. Trying with simplified parameters...")
+            
+            # Try one more time with very basic parameters
+            try:
+                encoded_chat = self.tokenizer.apply_chat_template(
+                    self.current_messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_tensors="pt"
+                ).to(self.device)
+                
+                with torch.no_grad():
+                    outputs = self.model.generate(
+                        encoded_chat,
+                        max_new_tokens=50,  # Reduced for compatibility
+                        do_sample=False,    # Disable sampling to avoid issues
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                    )
+                
+                generated_response_ids = outputs[0][encoded_chat.shape[1]:]
+                assistant_reply = self.tokenizer.decode(generated_response_ids, skip_special_tokens=True).strip()
+                
+                if assistant_reply:
+                    self.current_messages.append({"role": "assistant", "content": assistant_reply})
+                    self.conversation_history.append({
+                        "user": user_input,
+                        "assistant": assistant_reply,
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    print(f"\nPhi-3: {assistant_reply}")
+                    print("(Used simplified generation due to compatibility issues)")
+                else:
+                    print("Unable to generate response. Please try 'reset' or restart the session.")
+                    
+            except Exception as fallback_error:
+                print(f"Fallback generation also failed: {fallback_error}")
+                print("Please try 'reset' to clear the conversation or restart the session.")
+            
+            # Remove the user message if generation completely failed
             if self.current_messages and self.current_messages[-1]["role"] == "user":
                 self.current_messages.pop()
     
