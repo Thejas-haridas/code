@@ -46,32 +46,30 @@ class Phi3ChatBot:
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             
-            # Add padding token if it doesn't exist
+            # Set padding token - use a different token than eos to avoid attention mask issues
             if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
+                if self.tokenizer.unk_token is not None:
+                    self.tokenizer.pad_token = self.tokenizer.unk_token
+                else:
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+                    # Also set pad_token_id explicitly
+                    self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
             
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
                 trust_remote_code=True,
                 torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32,
-                device_map="auto"
+                device_map="auto",
+                # Disable problematic caching
+                use_cache=False
             )
             self.model.eval()
             print("Model loaded successfully!")
             
-            # Try to set up pipeline
-            try:
-                self.pipe = pipeline(
-                    "text-generation",
-                    model=self.model,
-                    tokenizer=self.tokenizer,
-                    trust_remote_code=True
-                )
-                print("Pipeline initialized successfully!")
-            except Exception as e:
-                print(f"Pipeline initialization failed: {e}")
-                print("Proceeding with manual tokenization.")
-                self.pipe = None
+            # Skip pipeline due to compatibility issues with Phi-3
+            print("Skipping pipeline initialization due to known compatibility issues with Phi-3.")
+            print("Using manual tokenization for better compatibility.")
+            self.pipe = None
                 
         except Exception as e:
             print(f"Error loading model: {e}")
@@ -211,52 +209,103 @@ class Phi3ChatBot:
         return assistant_reply
     
     def _generate_response_manual(self, messages):
-        """Generate response using manual tokenization."""
-        encoded_chat = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt"
-        ).to(self.device)
-        
-        # Create attention mask
-        attention_mask = encoded_chat.ne(self.tokenizer.pad_token_id).long()
-        
-        # Prepare generation kwargs
-        generation_kwargs = {
-            "max_new_tokens": self.max_new_tokens,
-            "num_return_sequences": 1,
-            "do_sample": self.do_sample,
-            "pad_token_id": self.tokenizer.pad_token_id,
-            "eos_token_id": self.tokenizer.eos_token_id,
-            "use_cache": True,
-        }
-        
-        # Add sampling parameters only if do_sample is True
-        if self.do_sample:
-            generation_kwargs.update({
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-                "repetition_penalty": self.repetition_penalty,
-            })
-        
-        # Try to disable problematic cache features for compatibility
+        """Generate response using manual tokenization with compatibility fixes."""
         try:
-            generation_kwargs["past_key_values"] = None
-        except:
-            pass
-        
-        with torch.no_grad():
-            outputs = self.model.generate(
-                encoded_chat,
-                attention_mask=attention_mask,
-                **generation_kwargs
-            )
-        
-        generated_response_ids = outputs[0][encoded_chat.shape[1]:]
-        generated_text = self.tokenizer.decode(generated_response_ids, skip_special_tokens=True).strip()
-        
-        return generated_text
+            # Apply chat template
+            encoded_chat = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt"
+            ).to(self.device)
+            
+            # Create explicit attention mask to avoid the warning
+            # Make sure pad tokens are properly masked
+            if self.tokenizer.pad_token_id == self.tokenizer.eos_token_id:
+                # If pad and eos are the same, create a mask that attends to all tokens
+                attention_mask = torch.ones_like(encoded_chat)
+            else:
+                attention_mask = encoded_chat.ne(self.tokenizer.pad_token_id).long()
+            
+            # Prepare generation kwargs with compatibility fixes
+            generation_kwargs = {
+                "input_ids": encoded_chat,
+                "attention_mask": attention_mask,
+                "max_new_tokens": min(self.max_new_tokens, 100),  # Limit to avoid issues
+                "do_sample": self.do_sample,
+                "pad_token_id": self.tokenizer.pad_token_id,
+                "eos_token_id": self.tokenizer.eos_token_id,
+                "use_cache": False,  # Disable cache to avoid DynamicCache issues
+                "return_dict_in_generate": False,  # Simplified return format
+            }
+            
+            # Add sampling parameters only if do_sample is True
+            if self.do_sample:
+                generation_kwargs.update({
+                    "temperature": max(0.1, min(self.temperature, 2.0)),  # Clamp temperature
+                    "top_p": max(0.1, min(self.top_p, 1.0)),  # Clamp top_p
+                })
+                
+                # Only add repetition penalty if it's not too close to 1.0
+                if abs(self.repetition_penalty - 1.0) > 0.05:
+                    generation_kwargs["repetition_penalty"] = max(1.0, min(self.repetition_penalty, 2.0))
+            
+            with torch.no_grad():
+                # Generate with explicit parameters
+                outputs = self.model.generate(**generation_kwargs)
+            
+            # Extract only the new tokens
+            if outputs.dim() > 1:
+                generated_response_ids = outputs[0][encoded_chat.shape[1]:]
+            else:
+                generated_response_ids = outputs[encoded_chat.shape[1]:]
+            
+            # Decode the response
+            generated_text = self.tokenizer.decode(
+                generated_response_ids, 
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True
+            ).strip()
+            
+            return generated_text
+            
+        except Exception as e:
+            print(f"Manual generation error: {e}")
+            # Ultra-simple fallback
+            return self._simple_generate_fallback(messages)
+    
+    def _simple_generate_fallback(self, messages):
+        """Ultra-simple generation as last resort."""
+        try:
+            # Get just the last user message for simple completion
+            last_message = messages[-1]["content"] if messages else "Hello"
+            
+            # Simple tokenization
+            inputs = self.tokenizer.encode(
+                f"User: {last_message}\nAssistant:", 
+                return_tensors="pt"
+            ).to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    inputs,
+                    max_new_tokens=50,
+                    do_sample=False,  # Greedy decoding for stability
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    use_cache=False,
+                )
+            
+            response = self.tokenizer.decode(
+                outputs[0][inputs.shape[1]:], 
+                skip_special_tokens=True
+            ).strip()
+            
+            return response if response else "I'm having trouble generating a response right now."
+            
+        except Exception as e:
+            print(f"Even simple fallback failed: {e}")
+            return "I apologize, but I'm experiencing technical difficulties. Please try restarting the session."
     
     def generate_response(self, user_input):
         """Generate a response to user input."""
@@ -267,16 +316,8 @@ class Phi3ChatBot:
         start_time = time.time()
         
         try:
-            # Try pipeline first, fallback to manual if it fails
-            try:
-                if self.pipe:
-                    assistant_reply = self._generate_response_pipeline(self.current_messages)
-                else:
-                    assistant_reply = self._generate_response_manual(self.current_messages)
-            except Exception as pipeline_error:
-                print(f"Pipeline method failed: {pipeline_error}")
-                print("Falling back to manual generation...")
-                assistant_reply = self._generate_response_manual(self.current_messages)
+            # Use manual generation (pipeline disabled for Phi-3 compatibility)
+            assistant_reply = self._generate_response_manual(self.current_messages)
             
             # Clean up the response
             assistant_reply = assistant_reply.strip()
@@ -299,44 +340,7 @@ class Phi3ChatBot:
             
         except Exception as e:
             print(f"Error generating response: {e}")
-            print("This might be due to model compatibility issues. Trying with simplified parameters...")
-            
-            # Try one more time with very basic parameters
-            try:
-                encoded_chat = self.tokenizer.apply_chat_template(
-                    self.current_messages,
-                    tokenize=True,
-                    add_generation_prompt=True,
-                    return_tensors="pt"
-                ).to(self.device)
-                
-                with torch.no_grad():
-                    outputs = self.model.generate(
-                        encoded_chat,
-                        max_new_tokens=50,  # Reduced for compatibility
-                        do_sample=False,    # Disable sampling to avoid issues
-                        pad_token_id=self.tokenizer.pad_token_id,
-                        eos_token_id=self.tokenizer.eos_token_id,
-                    )
-                
-                generated_response_ids = outputs[0][encoded_chat.shape[1]:]
-                assistant_reply = self.tokenizer.decode(generated_response_ids, skip_special_tokens=True).strip()
-                
-                if assistant_reply:
-                    self.current_messages.append({"role": "assistant", "content": assistant_reply})
-                    self.conversation_history.append({
-                        "user": user_input,
-                        "assistant": assistant_reply,
-                        "timestamp": datetime.now().isoformat()
-                    })
-                    print(f"\nPhi-3: {assistant_reply}")
-                    print("(Used simplified generation due to compatibility issues)")
-                else:
-                    print("Unable to generate response. Please try 'reset' or restart the session.")
-                    
-            except Exception as fallback_error:
-                print(f"Fallback generation also failed: {fallback_error}")
-                print("Please try 'reset' to clear the conversation or restart the session.")
+            print("Removing failed message from conversation...")
             
             # Remove the user message if generation completely failed
             if self.current_messages and self.current_messages[-1]["role"] == "user":
