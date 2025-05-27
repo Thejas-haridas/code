@@ -212,32 +212,33 @@ Ensure the query is valid for Azure SQL Server.dont use NULLS LAST as its not pa
 """
 
 def make_analysis_prompt(question: str, sql_query: str, sql_result: dict) -> str:
-    """Creates a prompt for Phi-3-mini to analyze SQL results."""
-    # Truncate long results to fit within context window
-    result_str = json.dumps(sql_result, indent=2, default=str)
-    if len(result_str) > 1500:
-        result_str = result_str[:1500] + "\n... (results truncated)"
+    """Creates a streamlined prompt for Phi-3-mini to analyze SQL results."""
+    # Extract key data for analysis
+    if sql_result.get("success") and sql_result.get("data"):
+        data = sql_result["data"]
+        # Simplify data representation for short, focused analysis
+        if len(data) == 1 and len(data[0]) == 1:
+            # Single value result - extract the value
+            value = list(data[0].values())[0]
+            data_summary = f"Result: {value}"
+        else:
+            # Multiple values - create concise summary
+            data_summary = f"Data: {json.dumps(data[:3], default=str)}"  # Show first 3 rows only
+            if len(data) > 3:
+                data_summary += f" (showing 3 of {len(data)} rows)"
+    else:
+        data_summary = "No data returned or query failed"
 
     return f"""<|system|>
-You are an expert data analyst specializing in insurance data analysis. Provide clear, concise insights based on SQL query results.
+You are a concise data analyst. Provide a brief, direct answer with key insights only.
 <|end|>
 <|user|>
 Question: {question}
+{data_summary}
 
-SQL Query:
-{sql_query}
-
-Query Results:
-{result_str}
-
-Please analyze these results and provide key insights that directly answer the original question. Focus on:
-1. Direct answer to the question
-2. Key numbers and trends
-3. Business implications if relevant
+Provide a concise analysis in 2-3 sentences maximum.
 <|end|>
 <|assistant|>
-Based on the data analysis, here are the key findings:
-
 """
 
 # --- 5. High-Performance Inference ---
@@ -319,18 +320,18 @@ def generate_sql(question: str) -> Tuple[str, float]:
     return sql_query, generation_time
 
 def analyze_results(question: str, sql_query: str, sql_result: dict) -> Tuple[str, float]:
-    """Generates a natural language analysis using SmolLM."""
+    """Generates a natural language analysis using Phi-3-mini."""
     start_time = time.time()
     prompt = make_analysis_prompt(question, sql_query, sql_result)
-    analysis = generate_text_optimized(
+            analysis = generate_text_optimized(
         prompt, 
         app.state.analysis_model, 
         app.state.analysis_tokenizer, 
-        max_new_tokens=300, 
-        temperature=0.3
+        max_new_tokens=150,  # Reduced for more concise responses
+        temperature=0.1      # Lower temperature for focused answers
     )
     analysis_time = time.time() - start_time
-    logger.info(f"Analysis generated in {analysis_time:.2f}s using SmolLM")
+    logger.info(f"Analysis generated in {analysis_time:.2f}s using Phi-3-mini")
     return analysis.strip(), analysis_time
 
 def execute_sql(sql_query: str) -> Tuple[Dict[str, Any], float]:
@@ -425,8 +426,15 @@ async def process_query(request: QueryRequest):
         )
 
         total_processing_time = time.time() - total_start_time
+        
+        # Determine success based on SQL execution result
+        is_successful = (
+            sql_execution_result.get("success", False) or
+            (sql_execution_result.get("data") is not None and "error" not in sql_execution_result)
+        )
+        
         response_data = {
-            "success": "error" not in sql_execution_result,
+            "success": is_successful,
             "question": request.question,
             "generated_sql": sql_query,
             "sql_execution_result": sql_execution_result,
@@ -462,7 +470,7 @@ async def health_check():
 @app.get("/", include_in_schema=False)
 async def root():
     """Root endpoint."""
-    return {"message": "Dual-Model SQL Generation and Analysis API is running with SmolLM for analysis."}
+    return {"message": "Dual-Model SQL Generation and Analysis API is running with Phi-3-mini for analysis."}
 
 # --- 8. Additional Utility Endpoints ---
 
