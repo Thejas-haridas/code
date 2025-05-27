@@ -18,7 +18,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # Model and API Configuration
 MODEL_NAME = "defog/llama-3-sqlcoder-8b"  # Using the newer model
-API_ENDPOINT = "http://172.200.64.182:7860/execute" # API for SQL execution
+API_ENDPOINT = "http://172.200.64.182:7860/execute"  # API for SQL execution
 
 # File Path Configuration for saving results
 SAVE_PATH = "/home/text_sql"
@@ -149,7 +149,7 @@ def load_model_and_tokenizer(device: torch.device) -> Tuple[AutoModelForCausalLM
     if torch.cuda.is_available():
         model_kwargs.update({
             "device_map": "auto",
-            "load_in_8bit": True, # Use 8-bit quantization
+            "load_in_8bit": True,  # Use 8-bit quantization
         })
 
     model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, **model_kwargs)
@@ -196,3 +196,262 @@ Provide a clear, concise, and insightful summary.
 ### Executed SQL Query
 ```sql
 {sql_query}
+```
+
+### Query Results
+```json
+{result_str}
+```
+
+### Analysis
+Based on the data, here is an analysis of the findings:
+"""
+
+# --- 5. High-Performance Inference ---
+
+@contextmanager
+def inference_mode():
+    """Context manager for optimized inference."""
+    with torch.no_grad():
+        if torch.cuda.is_available():
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                yield
+        else:
+            yield
+
+def generate_text_optimized(prompt: str, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, max_new_tokens: int, temperature: float = 0.0) -> str:
+    """Highly optimized text generation function."""
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
+
+    # Move inputs to the same device as the model
+    model_device = next(model.parameters()).device
+    inputs = {k: v.to(model_device, non_blocking=True) for k, v in inputs.items()}
+
+    input_length = inputs['input_ids'].shape[1]
+
+    with inference_mode():
+        gen_kwargs = {
+            'input_ids': inputs['input_ids'],
+            'attention_mask': inputs.get('attention_mask'),
+            'max_new_tokens': max_new_tokens,
+            'do_sample': temperature > 0,
+            'num_beams': 1 if temperature == 0 else 4,
+            'pad_token_id': tokenizer.eos_token_id,
+            'use_cache': True,
+            'early_stopping': True,
+        }
+        if temperature > 0:
+            gen_kwargs['temperature'] = temperature
+
+        outputs = model.generate(**gen_kwargs)
+
+    new_tokens = outputs[0][input_length:]
+    generated_text = tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+    # Aggressive cleanup
+    del inputs, outputs, gen_kwargs
+    cleanup_memory()
+
+    return generated_text
+
+def extract_sql_from_response(response: str) -> str:
+    """Extracts SQL code from the model's response."""
+    if "```sql" in response:
+        start = response.find("```sql") + 6
+        end = response.find("```", start)
+        if end != -1:
+            return response[start:end].strip()
+    elif "sql" in response.lower():
+        start = response.lower().find("sql") + 3
+        # Look for common SQL keywords to find the end
+        lines = response[start:].split('\n')
+        sql_lines = []
+        for line in lines:
+            if line.strip() and not line.strip().startswith('#'):
+                sql_lines.append(line)
+            elif sql_lines:  # Stop at first empty line after SQL content
+                break
+        return '\n'.join(sql_lines).strip()
+    return response.strip()
+
+# --- 6. Core Logic Functions ---
+
+def generate_sql(question: str) -> Tuple[str, float]:
+    """Generates SQL query from a question."""
+    start_time = time.time()
+    prompt = make_sql_prompt(question)
+    response = generate_text_optimized(prompt, app.state.model, app.state.tokenizer, max_new_tokens=300)
+    sql_query = extract_sql_from_response(response)
+    generation_time = time.time() - start_time
+    logger.info(f"SQL generated in {generation_time:.2f}s")
+    return sql_query, generation_time
+
+def analyze_results(question: str, sql_query: str, sql_result: dict) -> Tuple[str, float]:
+    """Generates a natural language analysis of SQL results."""
+    start_time = time.time()
+    prompt = make_analysis_prompt(question, sql_query, sql_result)
+    analysis = generate_text_optimized(prompt, app.state.model, app.state.tokenizer, max_new_tokens=400, temperature=0.5)
+    analysis_time = time.time() - start_time
+    logger.info(f"Analysis generated in {analysis_time:.2f}s")
+    return analysis.strip(), analysis_time
+
+def execute_sql(sql_query: str) -> Tuple[Dict[str, Any], float]:
+    """Executes SQL query via the external API."""
+    start_time = time.time()
+    try:
+        response = requests.post(
+            API_ENDPOINT,
+            json={"query": sql_query},
+            headers={"Content-Type": "application/json"},
+            timeout=60
+        )
+        response.raise_for_status()
+        result = response.json()
+    except requests.RequestException as e:
+        logger.error(f"SQL execution API error: {e}")
+        result = {"error": str(e), "status_code": getattr(e.response, 'status_code', 500) if hasattr(e, 'response') and e.response else 500}
+
+    execution_time = time.time() - start_time
+    logger.info(f"SQL executed in {execution_time:.2f}s")
+    return result, execution_time
+
+def save_result_to_file(data: dict) -> str:
+    """Saves the full transaction to a timestamped file."""
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    filename = os.path.join(SAVE_PATH, f"query_{timestamp}.json")
+    try:
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=4, default=str)
+        logger.info(f"Result saved to {filename}")
+        return filename
+    except IOError as e:
+        logger.error(f"Failed to save file: {e}")
+        return f"Error saving file: {e}"
+
+def cleanup_memory():
+    """Aggressive memory cleanup."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
+# --- 7. FastAPI Application Events and Endpoints ---
+
+@app.on_event("startup")
+async def startup_event():
+    """Load model and tokenizer on application startup."""
+    app.state.device = setup_device()
+    app.state.model, app.state.tokenizer = load_model_and_tokenizer(app.state.device)
+    app.state.loop = asyncio.get_event_loop()
+
+@app.on_event("shutdown")
+def shutdown_event():
+    """Clean up resources on shutdown."""
+    cleanup_memory()
+    executor.shutdown(wait=True)
+    logger.info("🧹 Memory cleaned up and executor shut down.")
+
+@app.post("/generate-and-analyze-sql", response_model=QueryResponse)
+async def process_query(request: QueryRequest):
+    """
+    Main endpoint to process a natural language question through the full
+    generate -> execute -> analyze pipeline.
+    """
+    total_start_time = time.time()
+    loop = app.state.loop
+
+    try:
+        # 1. Generate SQL (CPU/GPU-bound, run in thread)
+        sql_query, sql_generation_time = await loop.run_in_executor(
+            executor, generate_sql, request.question
+        )
+
+        if not sql_query:
+            raise HTTPException(status_code=400, detail="Failed to generate SQL query.")
+
+        # 2. Execute SQL (I/O-bound, run in thread)
+        sql_execution_result, sql_execution_time = await loop.run_in_executor(
+            executor, execute_sql, sql_query
+        )
+
+        # 3. Analyze Results (CPU/GPU-bound, run in thread)
+        llm_analysis, llm_analysis_time = await loop.run_in_executor(
+            executor, analyze_results, request.question, sql_query, sql_execution_result
+        )
+
+        total_processing_time = time.time() - total_start_time
+        response_data = {
+            "success": "error" not in sql_execution_result,
+            "question": request.question,
+            "generated_sql": sql_query,
+            "sql_execution_result": sql_execution_result,
+            "llm_analysis": llm_analysis,
+            "sql_generation_time": round(sql_generation_time, 2),
+            "llm_analysis_time": round(llm_analysis_time, 2),
+            "sql_execution_time": round(sql_execution_time, 2),
+            "total_processing_time": round(total_processing_time, 2),
+        }
+
+        # 4. Save results (I/O-bound, can run in thread)
+        file_saved = await loop.run_in_executor(
+            executor, save_result_to_file, response_data
+        )
+        
+        response_data["file_saved"] = file_saved
+        return QueryResponse(**response_data)
+
+    except Exception as e:
+        logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {
+        "status": "healthy",
+        "model_loaded": hasattr(app.state, 'model'),
+        "device": str(app.state.device) if hasattr(app.state, 'device') else "unknown"
+    }
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """Root endpoint."""
+    return {"message": "Optimized SQL Generation and Analysis API is running."}
+
+# --- 8. Additional Utility Endpoints ---
+
+@app.post("/generate-sql-only")
+async def generate_sql_only(request: QueryRequest):
+    """Generate SQL query without execution or analysis."""
+    try:
+        sql_query, generation_time = await app.state.loop.run_in_executor(
+            executor, generate_sql, request.question
+        )
+        return {
+            "question": request.question,
+            "generated_sql": sql_query,
+            "generation_time": round(generation_time, 2)
+        }
+    except Exception as e:
+        logger.error(f"SQL generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"SQL generation failed: {str(e)}")
+
+@app.get("/memory-status")
+async def memory_status():
+    """Get current memory usage statistics."""
+    memory_info = {}
+    
+    if torch.cuda.is_available():
+        memory_info["gpu_memory_allocated"] = torch.cuda.memory_allocated() / 1e9
+        memory_info["gpu_memory_reserved"] = torch.cuda.memory_reserved() / 1e9
+        memory_info["gpu_memory_total"] = torch.cuda.get_device_properties(0).total_memory / 1e9
+    
+    import psutil
+    process = psutil.Process()
+    memory_info["cpu_memory_mb"] = process.memory_info().rss / 1024 / 1024
+    
+    return memory_info
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
