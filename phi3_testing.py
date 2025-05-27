@@ -39,7 +39,6 @@ try:
         "text-generation",
         model=model,
         tokenizer=tokenizer,
-        # IMPORTANT: Remove 'device=device' here. Accelerate handles it.
         trust_remote_code=True
     )
 except Exception as e:
@@ -108,7 +107,6 @@ while True:
         start_time = time.time()
 
         if pipe:
-            # Use the pipeline for instruction following
             response = pipe(
                 current_messages,
                 max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
@@ -116,16 +114,10 @@ while True:
                 temperature=DEFAULT_TEMPERATURE,
                 top_p=DEFAULT_TOP_P,
                 eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.eos_token_id, # Ensure pad token is set for generation
-                # This might help with the attention mask warning and cache issues
-                batch_encode_plus={
-                    'padding': True,
-                    'return_tensors': 'pt'
-                }
+                pad_token_id=tokenizer.eos_token_id,
             )
             generated_text_full = response[0]['generated_text']
 
-            # Extract only the assistant's last reply
             assistant_marker = "<|assistant|>"
             end_marker = "<|end|>"
 
@@ -141,11 +133,9 @@ while True:
                 assistant_reply = generated_text_full.strip()
 
             print(f"\nPhi-3: {assistant_reply}")
-            # Add assistant's reply to the conversation history for multi-turn chats
             current_messages.append({"role": "assistant", "content": assistant_reply})
 
         else: # Manual tokenization fallback if pipeline failed
-            # Apply chat template manually
             encoded_chat = tokenizer.apply_chat_template(
                 current_messages,
                 tokenize=True,
@@ -162,7 +152,6 @@ while True:
                 do_sample=True,
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
-                # Explicitly pass attention_mask for manual generation
                 attention_mask=encoded_chat.ne(tokenizer.pad_token_id).long()
             )
 
