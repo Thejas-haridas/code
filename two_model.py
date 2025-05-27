@@ -12,13 +12,13 @@ from typing import Tuple, Dict, Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import requests
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig # Keep BitsAndBytesConfig for reference or if you later want 4-bit
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
 # --- 1. Configuration ---
 
 # Model Configuration
 SQL_MODEL_NAME = "defog/llama-3-sqlcoder-8b"  # For SQL generation
-ANALYSIS_MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct" # *** CHANGED TO PHI-3 MINI ***
+ANALYSIS_MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"  # For analysis
 API_ENDPOINT = "http://172.200.64.182:7860/execute"  # API for SQL execution
 
 # File Path Configuration for saving results
@@ -119,10 +119,10 @@ def setup_device() -> torch.device:
         device = torch.device("cuda")
         gpu_name = torch.cuda.get_device_name(0)
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-
+        
         logger.info(f"✅ GPU detected: {gpu_name}")
         logger.info(f"📊 GPU Memory: {gpu_memory:.1f} GB")
-
+        
         torch.cuda.empty_cache()
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -150,11 +150,11 @@ def load_sql_model_and_tokenizer(device: torch.device) -> Tuple[AutoModelForCaus
     if torch.cuda.is_available():
         model_kwargs.update({
             "device_map": "auto",
-            "load_in_8bit": True, # Keep 8-bit for Llama-3-SQLCoder
+            "load_in_8bit": True,
         })
 
     model = AutoModelForCausalLM.from_pretrained(SQL_MODEL_NAME, **model_kwargs)
-
+    
     model.eval()
     if hasattr(model, 'config'):
         model.config.use_cache = True
@@ -163,52 +163,34 @@ def load_sql_model_and_tokenizer(device: torch.device) -> Tuple[AutoModelForCaus
     return model, tokenizer
 
 def load_analysis_model_and_tokenizer(device: torch.device) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
-    """Load Phi-3 Mini analysis model and tokenizer with optimizations."""
-    logger.info(f"🔄 Loading {ANALYSIS_MODEL_NAME} analysis model and tokenizer...")
+    """Load Phi-3-mini analysis model and tokenizer with optimizations."""
+    logger.info("🔄 Loading Phi-3-mini analysis model and tokenizer...")
     load_start_time = time.time()
 
-    # For Phi-3-mini-4k-instruct, it's often best to load without explicit 8-bit
-    # unless memory is a severe constraint, then consider load_in_4bit with BitsAndBytesConfig
-    # For now, let's load it as is, or with float16 if GPU.
-    tokenizer = AutoTokenizer.from_pretrained(ANALYSIS_MODEL_NAME, use_fast=True)
+    # Setup quantization for Phi-3-mini
+    quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+    
+    tokenizer = AutoTokenizer.from_pretrained(ANALYSIS_MODEL_NAME, use_fast=True, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    if tokenizer.chat_template is None: # Phi-3 uses a specific chat template
-        tokenizer.chat_template = (
-            "{% for message in messages %}"
-            "{% if message['role'] == 'user' %}"
-            "{{ '<|user|>\n' + message['content'] + '<|end|>\n' }}"
-            "{% elif message['role'] == 'assistant' %}"
-            "{{ '<|assistant|>\n' + message['content'] + '<|end|>\n' }}"
-            "{% endif %}"
-            "{% endfor %}"
-            "{% if add_generation_prompt %}"
-            "{{ '<|assistant|>' }}"
-            "{% endif %}"
-        )
-
 
     model_kwargs = {
-        "trust_remote_code": True,
-        "torch_dtype": torch.bfloat16 if torch.cuda.is_available() else torch.float32, # bfloat16 for Ampere+ GPUs, float16 for older, float32 for CPU
+        "quantization_config": quantization_config,
+        "torch_dtype": torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         "low_cpu_mem_usage": True,
+        "trust_remote_code": True,
     }
 
     if torch.cuda.is_available():
-        model_kwargs.update({
-            "device_map": "auto",
-            # Optional: If you still face OOM with Phi-3 Mini, uncomment this:
-            # "quantization_config": BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16),
-            # "attn_implementation": "flash_attention_2", # Requires compatible GPU (Ampere or newer) and libraries
-        })
+        model_kwargs["device_map"] = "auto"
 
     model = AutoModelForCausalLM.from_pretrained(ANALYSIS_MODEL_NAME, **model_kwargs)
-
+    
     model.eval()
     if hasattr(model, 'config'):
         model.config.use_cache = True
 
-    logger.info(f"🤖 {ANALYSIS_MODEL_NAME} analysis model loaded in {time.time() - load_start_time:.2f}s")
+    logger.info(f"🤖 Phi-3-mini analysis model loaded in {time.time() - load_start_time:.2f}s")
     return model, tokenizer
 
 # --- 4. Prompt Engineering ---
@@ -230,52 +212,33 @@ Ensure the query is valid for Azure SQL Server.dont use NULLS LAST as its not pa
 """
 
 def make_analysis_prompt(question: str, sql_query: str, sql_result: dict) -> str:
-    """Creates a prompt for the analysis model (Phi-3 Mini) to analyze SQL results."""
+    """Creates a prompt for Phi-3-mini to analyze SQL results."""
     # Truncate long results to fit within context window
     result_str = json.dumps(sql_result, indent=2, default=str)
     if len(result_str) > 1500:
-        result_str = result_str[:1500] + "\n... (results truncated for brevity)"
+        result_str = result_str[:1500] + "\n... (results truncated)"
 
-    # Extract relevant data from sql_result for clearer prompting
-    actual_result_value = None
-    if sql_result and sql_result.get('success') and sql_result.get('data') and len(sql_result['data']) > 0:
-        first_row = sql_result['data'][0]
-        if first_row:
-            # Assuming the value is the first one in the dict for aggregate results
-            actual_result_value = next(iter(first_row.values()), None)
+    return f"""<|system|>
+You are an expert data analyst specializing in insurance data analysis. Provide clear, concise insights based on SQL query results.
+<|end|>
+<|user|>
+Question: {question}
 
-    # Use Phi-3's instruction format for clarity
-    messages = [
-        {"role": "user", "content": f"""
-You are a data analyst. Your task is to provide a concise, direct, natural language answer to the original question, based ONLY on the provided SQL query results.
-
-Do NOT generate any code (Python, SQL, R, JSON, etc.), functions, or external commands.
-Do NOT include any introductory phrases like "Based on the results," "The analysis shows," or "According to the data."
-Do NOT include any concluding remarks or conversational filler.
-Just provide the direct answer or a summary.
-
-Original Question: {question}
-
-Executed SQL Query:
+SQL Query:
 {sql_query}
 
-SQL Execution Result (Raw JSON):
+Query Results:
 {result_str}
 
-"""}
-    ]
+Please analyze these results and provide key insights that directly answer the original question. Focus on:
+1. Direct answer to the question
+2. Key numbers and trends
+3. Business implications if relevant
+<|end|>
+<|assistant|>
+Based on the data analysis, here are the key findings:
 
-    # Add specific guidance if a clear single value result is found
-    if actual_result_value is not None:
-        messages[0]["content"] += f"\n\nSpecifically, the numerical result for this query is: {actual_result_value}\n\nGiven the question '{question}', what is the direct natural language answer based ONLY on the result '{actual_result_value}'?"
-    else:
-        messages[0]["content"] += f"\n\nGiven the question '{question}', provide a direct natural language summary of the above SQL Execution Result."
-
-    # Apply the tokenizer's chat template
-    # Phi-3 models use the tokenizer.apply_chat_template for correct formatting
-    # ensure add_generation_prompt=True to tell the model it's its turn to generate
-    return app.state.analysis_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-
+"""
 
 # --- 5. High-Performance Inference ---
 
@@ -284,8 +247,6 @@ def inference_mode():
     """Context manager for optimized inference."""
     with torch.no_grad():
         if torch.cuda.is_available():
-            # Use bfloat16 if GPU supports it, otherwise float16 or float32
-            # Phi-3 typically runs well with bfloat16
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 yield
         else:
@@ -293,10 +254,6 @@ def inference_mode():
 
 def generate_text_optimized(prompt: str, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, max_new_tokens: int, temperature: float = 0.0) -> str:
     """Highly optimized text generation function."""
-    # Ensure correct padding_side for generation
-    original_padding_side = tokenizer.padding_side
-    tokenizer.padding_side = "left" # Typically for generation to pad inputs
-
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
 
     # Move inputs to the same device as the model
@@ -311,33 +268,18 @@ def generate_text_optimized(prompt: str, model: AutoModelForCausalLM, tokenizer:
             'attention_mask': inputs.get('attention_mask'),
             'max_new_tokens': max_new_tokens,
             'do_sample': temperature > 0,
-            'num_beams': 1 if temperature == 0 else 1, # Keep num_beams=1 for analysis for directness
+            'num_beams': 1 if temperature == 0 else 4,
             'pad_token_id': tokenizer.eos_token_id,
             'use_cache': True,
             'early_stopping': True,
         }
         if temperature > 0:
             gen_kwargs['temperature'] = temperature
-            gen_kwargs['top_p'] = 0.9 # Good default for sampling
 
         outputs = model.generate(**gen_kwargs)
 
-    # Reset padding side
-    tokenizer.padding_side = original_padding_side
-
-    # Decode and post-process
-    # For instruct models, output often includes the prompt plus the assistant's turn
-    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-    # For instruct models, specifically extract the assistant's part
-    if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None:
-        # This will depend on the exact chat template. For Phi-3, it's usually everything after '<|assistant|>'
-        assistant_tag = '<|assistant|>'
-        if assistant_tag in generated_text:
-            generated_text = generated_text.split(assistant_tag, 1)[1].strip()
-        # Further clean up any potential trailing end tokens if they somehow made it through skip_special_tokens
-        generated_text = generated_text.replace('<|end|>', '').strip()
-
+    new_tokens = outputs[0][input_length:]
+    generated_text = tokenizer.decode(new_tokens, skip_special_tokens=True)
 
     # Aggressive cleanup
     del inputs, outputs, gen_kwargs
@@ -347,20 +289,19 @@ def generate_text_optimized(prompt: str, model: AutoModelForCausalLM, tokenizer:
 
 def extract_sql_from_response(response: str) -> str:
     """Extracts SQL code from the model's response."""
-    # This logic remains the same for the SQLCoder model
     if "```sql" in response:
         start = response.find("```sql") + 6
         end = response.find("```", start)
         if end != -1:
             return response[start:end].strip()
-    elif "sql" in response.lower(): # Fallback for less structured output
+    elif "sql" in response.lower():
         start = response.lower().find("sql") + 3
         lines = response[start:].split('\n')
         sql_lines = []
         for line in lines:
             if line.strip() and not line.strip().startswith('#'):
                 sql_lines.append(line)
-            elif sql_lines: # Stop if we encounter an empty line after starting SQL
+            elif sql_lines:
                 break
         return '\n'.join(sql_lines).strip()
     return response.strip()
@@ -378,32 +319,19 @@ def generate_sql(question: str) -> Tuple[str, float]:
     return sql_query, generation_time
 
 def analyze_results(question: str, sql_query: str, sql_result: dict) -> Tuple[str, float]:
-    """Generates a natural language analysis using Phi-3 Mini."""
+    """Generates a natural language analysis using SmolLM."""
     start_time = time.time()
     prompt = make_analysis_prompt(question, sql_query, sql_result)
     analysis = generate_text_optimized(
-        prompt,
-        app.state.analysis_model,
-        app.state.analysis_tokenizer,
-        max_new_tokens=100,  # Max tokens for a concise analysis
-        temperature=0.1,     # Low temperature for direct, less creative output
-        num_beams=1          # Use greedy decoding for directness
+        prompt, 
+        app.state.analysis_model, 
+        app.state.analysis_tokenizer, 
+        max_new_tokens=300, 
+        temperature=0.3
     )
-
-    # Post-processing to ensure no code or filler phrases
-    analysis = analysis.replace("```python", "").replace("```sql", "").replace("```", "").strip()
-    analysis_lines = [line for line in analysis.split('\n') if not (
-        line.strip().startswith('import') or
-        line.strip().startswith('from') or
-        line.strip().startswith('df = pd.read_sql_query') or
-        line.strip().startswith('print(') or
-        line.strip() == '"""' # Remove triple quotes if model outputs them
-    )]
-    analysis = "\n".join(analysis_lines).strip()
-
     analysis_time = time.time() - start_time
-    logger.info(f"Analysis generated in {analysis_time:.2f}s using {ANALYSIS_MODEL_NAME}")
-    return analysis, analysis_time
+    logger.info(f"Analysis generated in {analysis_time:.2f}s using SmolLM")
+    return analysis.strip(), analysis_time
 
 def execute_sql(sql_query: str) -> Tuple[Dict[str, Any], float]:
     """Executes SQL query via the external API."""
@@ -419,16 +347,7 @@ def execute_sql(sql_query: str) -> Tuple[Dict[str, Any], float]:
         result = response.json()
     except requests.RequestException as e:
         logger.error(f"SQL execution API error: {e}")
-        # Capture more specific error details if available
-        error_details = {"error": str(e)}
-        if hasattr(e, 'response') and e.response is not None:
-            try:
-                error_details.update(e.response.json())
-                error_details["status_code"] = e.response.status_code
-            except json.JSONDecodeError:
-                error_details["raw_response"] = e.response.text
-                error_details["status_code"] = e.response.status_code
-        result = error_details
+        result = {"error": str(e), "status_code": getattr(e.response, 'status_code', 500) if hasattr(e, 'response') and e.response else 500}
 
     execution_time = time.time() - start_time
     logger.info(f"SQL executed in {execution_time:.2f}s")
@@ -460,13 +379,13 @@ def cleanup_memory():
 async def startup_event():
     """Load both models on application startup."""
     app.state.device = setup_device()
-
+    
     # Load SQL generation model
     app.state.sql_model, app.state.sql_tokenizer = load_sql_model_and_tokenizer(app.state.device)
-
+    
     # Load analysis model
     app.state.analysis_model, app.state.analysis_tokenizer = load_analysis_model_and_tokenizer(app.state.device)
-
+    
     app.state.loop = asyncio.get_event_loop()
     logger.info("🚀 Both models loaded successfully!")
 
@@ -486,14 +405,6 @@ async def process_query(request: QueryRequest):
     total_start_time = time.time()
     loop = app.state.loop
 
-    sql_query = ""
-    sql_generation_time = 0.0
-    sql_execution_result = {"error": "SQL execution not attempted."}
-    sql_execution_time = 0.0
-    llm_analysis = "Analysis not performed."
-    llm_analysis_time = 0.0
-    overall_success = False
-
     try:
         # 1. Generate SQL using SQLCoder
         sql_query, sql_generation_time = await loop.run_in_executor(
@@ -501,8 +412,6 @@ async def process_query(request: QueryRequest):
         )
 
         if not sql_query:
-            logger.error("Failed to generate SQL query.")
-            llm_analysis = "Failed to generate SQL query."
             raise HTTPException(status_code=400, detail="Failed to generate SQL query.")
 
         # 2. Execute SQL
@@ -510,58 +419,35 @@ async def process_query(request: QueryRequest):
             executor, execute_sql, sql_query
         )
 
-        # Check if SQL execution itself was successful
-        if "error" in sql_execution_result and sql_execution_result["error"] is not None:
-            logger.error(f"SQL execution failed: {sql_execution_result['error']}")
-            llm_analysis = f"SQL execution failed with error: {sql_execution_result['error']}"
-            overall_success = False
-        else:
-            # 3. Analyze Results using Phi-3 Mini
-            llm_analysis, llm_analysis_time = await loop.run_in_executor(
-                executor, analyze_results, request.question, sql_query, sql_execution_result
-            )
+        # 3. Analyze Results using SmolLM
+        llm_analysis, llm_analysis_time = await loop.run_in_executor(
+            executor, analyze_results, request.question, sql_query, sql_execution_result
+        )
 
-            # Heuristic check for analysis quality: look for common code patterns or empty analysis
-            # Refine these patterns based on what the model might incorrectly output
-            if any(p in llm_analysis.lower() for p in ['import ', 'def ', 'class ', 'select ', 'from ', 'join ', '```', 'json.dumps', 'pd.read_sql_query']):
-                logger.warning("LLM analysis still contains suspected code patterns. Marking overall success as false.")
-                llm_analysis = "Analysis failed to provide natural language insights (generated code or unexpected patterns)."
-                overall_success = False
-            elif not llm_analysis.strip():
-                logger.warning("LLM analysis is empty after generation. Marking overall success as false.")
-                llm_analysis = "LLM analysis provided an empty response."
-                overall_success = False
-            else:
-                overall_success = True # All steps succeeded and analysis looks good
+        total_processing_time = time.time() - total_start_time
+        response_data = {
+            "success": "error" not in sql_execution_result,
+            "question": request.question,
+            "generated_sql": sql_query,
+            "sql_execution_result": sql_execution_result,
+            "llm_analysis": llm_analysis,
+            "sql_generation_time": round(sql_generation_time, 2),
+            "llm_analysis_time": round(llm_analysis_time, 2),
+            "sql_execution_time": round(sql_execution_time, 2),
+            "total_processing_time": round(total_processing_time, 2),
+        }
 
-    except HTTPException as e:
-        # Re-raise explicit HTTP exceptions
-        raise e
+        # 4. Save results
+        file_saved = await loop.run_in_executor(
+            executor, save_result_to_file, response_data
+        )
+        
+        response_data["file_saved"] = file_saved
+        return QueryResponse(**response_data)
+
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
-        llm_analysis = f"An internal server error occurred during processing: {str(e)}"
-        overall_success = False # Catch-all for other errors
-
-    total_processing_time = time.time() - total_start_time
-    response_data = {
-        "success": overall_success,
-        "question": request.question,
-        "generated_sql": sql_query,
-        "sql_execution_result": sql_execution_result,
-        "llm_analysis": llm_analysis,
-        "sql_generation_time": round(sql_generation_time, 2),
-        "llm_analysis_time": round(llm_analysis_time, 2),
-        "sql_execution_time": round(sql_execution_time, 2),
-        "total_processing_time": round(total_processing_time, 2),
-    }
-
-    # 4. Save results - always try to save even on failure
-    file_saved = await loop.run_in_executor(
-        executor, save_result_to_file, response_data
-    )
-
-    response_data["file_saved"] = file_saved
-    return QueryResponse(**response_data)
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
 
 @app.get("/health")
 async def health_check():
@@ -576,7 +462,7 @@ async def health_check():
 @app.get("/", include_in_schema=False)
 async def root():
     """Root endpoint."""
-    return {"message": "Dual-Model SQL Generation and Analysis API is running with Phi-3 Mini for analysis."}
+    return {"message": "Dual-Model SQL Generation and Analysis API is running with SmolLM for analysis."}
 
 # --- 8. Additional Utility Endpoints ---
 
@@ -600,16 +486,16 @@ async def generate_sql_only(request: QueryRequest):
 async def memory_status():
     """Get current memory usage statistics."""
     memory_info = {}
-
+    
     if torch.cuda.is_available():
         memory_info["gpu_memory_allocated"] = torch.cuda.memory_allocated() / 1e9
         memory_info["gpu_memory_reserved"] = torch.cuda.memory_reserved() / 1e9
         memory_info["gpu_memory_total"] = torch.cuda.get_device_properties(0).total_memory / 1e9
-
+    
     import psutil
     process = psutil.Process()
     memory_info["cpu_memory_mb"] = process.memory_info().rss / 1024 / 1024
-
+    
     return memory_info
 
 @app.get("/model-info")
