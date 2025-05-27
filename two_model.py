@@ -227,7 +227,7 @@ SQL Query:
 Results:
 {result_str}
 
-Analysis: Based on the data above, here are the key findings:"""
+based on this give result the result should be precise and no other information other than provided should be used do not infer result by your own
 
 # --- 5. High-Performance Inference ---
 
