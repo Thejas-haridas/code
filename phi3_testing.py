@@ -3,9 +3,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 import time
 
 # --- Configuration ---
-# Choose the Phi-3 model you want to test.
-# Examples: "microsoft/Phi-3-small-8k-instruct", "microsoft/Phi-3-mini-4k-instruct"
-MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct" # A good starting point for local testing
+MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"
 
 # Generation parameters (can be adjusted)
 DEFAULT_MAX_NEW_TOKENS = 200
@@ -23,11 +21,9 @@ try:
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
         trust_remote_code=True,
-        torch_dtype=torch.float16 if device.type == "cuda" else torch.float32, # Use float16 for GPU for faster inference
-        device_map="auto" # Automatically map model layers to available devices (GPU/CPU)
+        torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+        device_map="auto" # Let accelerate manage device placement
     )
-    # Ensure the model is on the correct device
-    model.to(device)
     model.eval() # Set model to evaluation mode
     print("Model loaded successfully!")
     print(f"Type 'quit' or 'exit' to stop the interactive session.")
@@ -38,19 +34,18 @@ except Exception as e:
     exit()
 
 # Set up the pipeline for easier interaction with instruct models
-# The pipeline handles the chat template automatically if the tokenizer has one.
 try:
     pipe = pipeline(
         "text-generation",
         model=model,
         tokenizer=tokenizer,
-        device=device,
+        # IMPORTANT: Remove 'device=device' here. Accelerate handles it.
         trust_remote_code=True
     )
 except Exception as e:
     print(f"Error initializing pipeline: {e}")
     print("Proceeding with manual tokenization. Some instruct model features might be less optimized.")
-    pipe = None # Fallback to manual if pipeline fails
+    pipe = None
 
 # --- Interactive Loop ---
 print("\n--- Interactive Phi-3 Session ---")
@@ -121,31 +116,28 @@ while True:
                 temperature=DEFAULT_TEMPERATURE,
                 top_p=DEFAULT_TOP_P,
                 eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.eos_token_id # Important for batching, though less critical for single interactive input
+                pad_token_id=tokenizer.eos_token_id, # Ensure pad token is set for generation
+                # This might help with the attention mask warning and cache issues
+                batch_encode_plus={
+                    'padding': True,
+                    'return_tensors': 'pt'
+                }
             )
             generated_text_full = response[0]['generated_text']
 
             # Extract only the assistant's last reply
-            # The chat template adds specific markers. We need to find the last assistant turn.
-            # Example: <|system|>...<|end|><|user|>...<|end|><|assistant|>...<|end|>
-            # We want the content after the final <|assistant|> and before its <|end|>
             assistant_marker = "<|assistant|>"
             end_marker = "<|end|>"
 
-            # Find the last assistant marker
             last_assistant_index = generated_text_full.rfind(assistant_marker)
             if last_assistant_index != -1:
-                # Get the part of the string starting from the last assistant marker
                 assistant_response_part = generated_text_full[last_assistant_index + len(assistant_marker):]
-                # Find the first end_marker after the assistant's response
                 end_index = assistant_response_part.find(end_marker)
                 if end_index != -1:
                     assistant_reply = assistant_response_part[:end_index].strip()
                 else:
-                    assistant_reply = assistant_response_part.strip() # No end marker, take till end
+                    assistant_reply = assistant_response_part.strip()
             else:
-                # Fallback if the assistant marker isn't found (e.g., first turn, or non-chat-templated model)
-                # In this case, just show the full generated text, which might include the prompt
                 assistant_reply = generated_text_full.strip()
 
             print(f"\nPhi-3: {assistant_reply}")
@@ -154,14 +146,10 @@ while True:
 
         else: # Manual tokenization fallback if pipeline failed
             # Apply chat template manually
-            # This is crucial for instruct models to understand multi-turn conversation context
-            # Phi-3 instruct models use a specific format
-            # e.g., <|system|>You are a helpful AI assistant.<|end|><|user|>What is X?<|end|>
-            # Note: `apply_chat_template` is the recommended way to format inputs for instruct models.
             encoded_chat = tokenizer.apply_chat_template(
                 current_messages,
                 tokenize=True,
-                add_generation_prompt=True, # Add the special token that indicates the model should generate
+                add_generation_prompt=True,
                 return_tensors="pt"
             ).to(device)
 
@@ -171,19 +159,17 @@ while True:
                 num_return_sequences=1,
                 temperature=DEFAULT_TEMPERATURE,
                 top_p=DEFAULT_TOP_P,
-                do_sample=True, # Enable sampling for temperature/top_p
+                do_sample=True,
                 pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id # Stop generation at EOS
+                eos_token_id=tokenizer.eos_token_id,
+                # Explicitly pass attention_mask for manual generation
+                attention_mask=encoded_chat.ne(tokenizer.pad_token_id).long()
             )
 
-            # Decode the generated text. Note that `outputs` will contain the input prompt as well.
-            # We need to slice it to get only the new tokens generated by the model.
-            generated_response_ids = outputs[0][encoded_chat.shape[1]:] # Get only the new tokens
+            generated_response_ids = outputs[0][encoded_chat.shape[1]:]
             generated_text = tokenizer.decode(generated_response_ids, skip_special_tokens=True).strip()
             print(f"\nPhi-3: {generated_text}")
-            # Add assistant's reply to the conversation history
             current_messages.append({"role": "assistant", "content": generated_text})
-
 
         end_time = time.time()
         print(f"(Time taken: {end_time - start_time:.2f} seconds)")
@@ -194,6 +180,5 @@ while True:
     except Exception as e:
         print(f"An error occurred: {e}")
         print("Please try again or 'reset' the conversation.")
-        # Optionally, you might want to remove the last user message if it caused an error
         if current_messages and current_messages[-1]["role"] == "user":
-            current_messages.pop() # Remove the problematic user input
+            current_messages.pop()
