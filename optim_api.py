@@ -167,7 +167,7 @@ def make_sql_prompt(question: str) -> str:
     """Creates a structured prompt for SQL generation."""
     return f"""### Task
 Generate a T-SQL query that answers the following question. Use the provided schema.
-Ensure the query is valid for Azure SQL Server.
+Ensure the query is valid for Azure SQL Server.dont use NULLS LAST as its not part of T-SQL
 
 ### Schema
 {DATABASE_SCHEMA}
