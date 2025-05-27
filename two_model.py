@@ -196,10 +196,24 @@ def load_analysis_model_and_tokenizer(device: torch.device) -> Tuple[AutoModelFo
 # --- 4. Prompt Engineering ---
 
 def make_sql_prompt(question: str) -> str:
-    """Creates a structured prompt for SQL generation."""
+    """Creates a structured prompt for SQL generation with T-SQL specific rules."""
     return f"""### Task
-Generate a T-SQL query that answers the following question. Use the provided schema.
-Ensure the query is valid for Azure SQL Server. Do not use NULLS LAST as it's not part of T-SQL
+Generate a T-SQL query for Azure SQL Server/SQL Server that answers the following question.
+
+### T-SQL Rules and Requirements:
+- Use proper T-SQL syntax only (no PostgreSQL, MySQL, or other SQL dialects)
+- Use DATEPART(), YEAR(), MONTH(), DAY() for date functions instead of EXTRACT()
+- Use ISNULL() instead of COALESCE() when possible
+- Use TOP instead of LIMIT
+- For pagination, use OFFSET...FETCH NEXT instead of LIMIT
+- Use proper JOIN syntax with explicit INNER/LEFT/RIGHT/FULL OUTER
+- For string operations, use LEN() instead of LENGTH(), CHARINDEX() instead of POSITION()
+- Use GETDATE() for current datetime, not NOW()
+- For conditional logic, prefer CASE WHEN over IIF() for compatibility
+- Do NOT use NULLS FIRST/NULLS LAST in ORDER BY (not supported in T-SQL)
+- Use proper table aliases and qualify column names where ambiguous
+- For date formatting, use FORMAT() or CONVERT() functions
+- Use appropriate data types: VARCHAR(MAX), NVARCHAR(MAX), DECIMAL, DATETIME2, etc.
 
 ### Schema
 {DATABASE_SCHEMA}
@@ -207,7 +221,15 @@ Ensure the query is valid for Azure SQL Server. Do not use NULLS LAST as it's no
 ### Question
 {question}
 
-### SQL
+### Instructions
+- Write clean, efficient T-SQL code
+- Include appropriate WHERE clauses for performance
+- Use meaningful table aliases (e.g., dc for dim_claims, dp for dim_policy)
+- Add comments for complex logic
+- Ensure all column references are valid according to the schema
+- Return only the SQL query without explanations
+
+### T-SQL Query
 ```sql
 """
 
@@ -289,23 +311,89 @@ def generate_text_optimized(prompt: str, model: AutoModelForCausalLM, tokenizer:
     return generated_text
 
 def extract_sql_from_response(response: str) -> str:
-    """Extracts SQL code from the model's response."""
+    """Extracts SQL code from the model's response with improved T-SQL parsing."""
+    # First try to find SQL in code blocks
     if "```sql" in response:
         start = response.find("```sql") + 6
         end = response.find("```", start)
         if end != -1:
-            return response[start:end].strip()
-    elif "sql" in response.lower():
-        start = response.lower().find("sql") + 3
-        lines = response[start:].split('\n')
-        sql_lines = []
-        for line in lines:
-            if line.strip() and not line.strip().startswith('#'):
-                sql_lines.append(line)
-            elif sql_lines:
-                break
-        return '\n'.join(sql_lines).strip()
-    return response.strip()
+            sql_query = response[start:end].strip()
+            return clean_tsql_query(sql_query)
+    
+    # Try to find SQL after "T-SQL Query" or similar markers
+    markers = ["### T-SQL Query", "T-SQL Query:", "Query:", "SELECT", "WITH", "INSERT", "UPDATE", "DELETE"]
+    for marker in markers:
+        if marker in response:
+            start = response.find(marker)
+            if marker in ["SELECT", "WITH", "INSERT", "UPDATE", "DELETE"]:
+                # For SQL keywords, include them in the result
+                sql_part = response[start:]
+            else:
+                # For other markers, skip the marker itself
+                sql_part = response[start + len(marker):]
+            
+            # Extract until we hit a non-SQL line or end
+            lines = sql_part.split('\n')
+            sql_lines = []
+            for line in lines:
+                cleaned_line = line.strip()
+                if not cleaned_line:
+                    continue
+                if cleaned_line.startswith('#') or cleaned_line.startswith('--'):
+                    continue
+                if any(keyword in cleaned_line.upper() for keyword in ['SELECT', 'FROM', 'WHERE', 'JOIN', 'GROUP BY', 'ORDER BY', 'HAVING', 'WITH', 'INSERT', 'UPDATE', 'DELETE']) or sql_lines:
+                    sql_lines.append(line.rstrip())
+                elif sql_lines:
+                    # Stop if we've started collecting SQL and hit a non-SQL line
+                    break
+            
+            if sql_lines:
+                return clean_tsql_query('\n'.join(sql_lines))
+    
+    # Fallback: return the response as-is if no SQL structure found
+    return clean_tsql_query(response.strip())
+
+def clean_tsql_query(sql_query: str) -> str:
+    """Clean and validate T-SQL query for common issues."""
+    if not sql_query:
+        return sql_query
+    
+    # Remove common non-T-SQL patterns and fix them
+    lines = sql_query.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        line = line.rstrip()
+        if not line.strip():
+            cleaned_lines.append(line)
+            continue
+            
+        # Skip comment lines but keep SQL comments
+        if line.strip().startswith('#'):
+            continue
+        
+        # Fix common non-T-SQL patterns
+        line_upper = line.upper()
+        
+        # Replace LIMIT with TOP (basic pattern)
+        if 'LIMIT ' in line_upper and 'SELECT' in line_upper:
+            # This is a simple replacement - more complex logic might be needed
+            line = line.replace('LIMIT ', '-- LIMIT converted to TOP: ')
+        
+        # Remove NULLS FIRST/LAST
+        if 'NULLS FIRST' in line_upper or 'NULLS LAST' in line_upper:
+            line = line.replace('NULLS FIRST', '').replace('NULLS LAST', '')
+            line = line.replace('nulls first', '').replace('nulls last', '')
+        
+        cleaned_lines.append(line)
+    
+    result = '\n'.join(cleaned_lines).strip()
+    
+    # Final cleanup - remove trailing semicolons if multiple exist
+    while result.endswith(';;'):
+        result = result[:-1]
+    
+    return result
 
 # --- 6. Core Logic Functions ---
 
