@@ -218,6 +218,12 @@ Generate a T-SQL query for Azure SQL Server/SQL Server that answers the followin
 ### Schema
 {DATABASE_SCHEMA}
 
+
+Join Conditions:
+fact_claims_dtl.claim_reference_id = dim_claims.claim_reference_id AND fact_claims_dtl.org_id = dim_claims.org_id
+fct_policy.policy_number = dim_policy.policy_number AND fct_policy.org_id = dim_policy.org_id
+
+
 ### Question
 {question}
 
