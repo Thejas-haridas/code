@@ -223,6 +223,14 @@ Join Conditions:
 fact_claims_dtl.claim_reference_id = dim_claims.claim_reference_id AND fact_claims_dtl.org_id = dim_claims.org_id
 fct_policy.policy_number = dim_policy.policy_number AND fct_policy.org_id = dim_policy.org_id
 
+Use the correct table based on keywords:
+   - Use `dwh.fact_premium` for premium/payment-related metrics.
+   - Use `dwh.dim_claims` or `dwh.fact_claims_dtl` for claim-related details.
+   - Use `dwh.dim_policy` for policy metadata (start/end dates, renewals, etc.).
+Use correct date fields:
+   - Use `date_paid` for premium payment dates.
+   - Use `date_claim_opened`, `date_closed`, etc. for claims.
+   - Use `effective_date`, `expiry_date_time` for policies.
 
 ### Question
 {question}
