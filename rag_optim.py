@@ -145,6 +145,8 @@ T-SQL Rules and Requirements:
 - Use TOP instead of LIMIT
 - For pagination, use OFFSET...FETCH NEXT instead of LIMIT
 - Use proper JOIN syntax with explicit INNER/LEFT/RIGHT/FULL OUTER
+-Do NOT use the column alias in the GROUP BY or ORDER BY clauses.
+-Instead, repeat the full expression used in the SELECT clause inside GROUP BY and ORDER BY
 - For string operations, use LEN() instead of LENGTH(), CHARINDEX() instead of POSITION()
 - Use GETDATE() for current datetime, not NOW()
 - For conditional logic, prefer CASE WHEN over IIF() for compatibility
