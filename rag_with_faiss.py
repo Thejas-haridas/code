@@ -164,7 +164,8 @@ class QueryResponse(BaseModel):
     generated_sql: str
     sql_execution_result: dict
     llm_analysis: str
-    retrieval_sql_generation_time: float
+    retrieval_time: float
+    sql_generation_time: float
     llm_analysis_time: float
     sql_execution_time: float
     total_processing_time: float
