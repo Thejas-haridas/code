@@ -691,8 +691,7 @@ async def process_query(request: QueryRequest):
            "generated_sql": sql_query,
            "sql_execution_result": sql_execution_result,
            "llm_analysis": llm_analysis,
-           "retrieval_time": round(sql_generation_time, 2),  # This includes retrieval time
-           "sql_generation_time": round(sql_generation_time, 2),
+           "retrieval+sql_generation_time": round(sql_generation_time, 2),
            "llm_analysis_time": round(llm_analysis_time, 2),
            "sql_execution_time": round(sql_execution_time, 2),
            "total_processing_time": round(total_processing_time, 2),
