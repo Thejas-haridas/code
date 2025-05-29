@@ -164,7 +164,7 @@ class QueryResponse(BaseModel):
     generated_sql: str
     sql_execution_result: dict
     llm_analysis: str
-    retrieval+sql_generation_time: float
+    retrieval_sql_generation_time: float
     llm_analysis_time: float
     sql_execution_time: float
     total_processing_time: float
@@ -655,7 +655,8 @@ async def process_query(request: QueryRequest):
             "generated_sql": sql_query,
             "sql_execution_result": sql_execution_result,
             "llm_analysis": llm_analysis,
-            "retrieval+sql_generation_time": round(sql_generation_time, 2),
+            "retrieval_time": round(sql_generation_time, 2),
+            sql_generation_time": round(sql_generation_time, 2),
             "llm_analysis_time": round(llm_analysis_time, 2),
             "sql_execution_time": round(sql_execution_time, 2),
             "total_processing_time": round(total_processing_time, 2),
