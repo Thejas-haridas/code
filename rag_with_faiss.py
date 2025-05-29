@@ -150,8 +150,6 @@ T-SQL Rules and Requirements:
 - its of date time format eg:2024-11-21 06:57:57.000
 """
 
-
-
 # --- 2. FastAPI and Pydantic Setup ---
 app = FastAPI(title="RAG-Enhanced SQL Query Generator and Analyzer", version="3.0.0")
 executor = ThreadPoolExecutor(max_workers=os.cpu_count() * 2)
@@ -173,7 +171,7 @@ class QueryResponse(BaseModel):
     total_processing_time: float
     file_saved: str
 
-# --- 3. RAG Schema Retrieval System with FAISS ---
+# --- 3. RAG Schema Retrieval System with FAISS (FIXED) ---
 class SchemaRetriever:
     def __init__(self, table_chunks: List[Dict], embedding_model_name: str):
         self.table_chunks = table_chunks
@@ -184,19 +182,27 @@ class SchemaRetriever:
         self.embeddings = None
         self.faiss_index = None
         self.embedding_model = None
+        self._is_initialized = False
 
     def load_embedding_model(self):
         """Load the sentence transformer model for embeddings."""
-        logger.info(f"🔄 Loading embedding model: {self.embedding_model_name}")
-        from sentence_transformers import SentenceTransformer
-        self.embedding_model = SentenceTransformer(self.embedding_model_name)
-        logger.info("✅ Embedding model loaded successfully")
+        if self.embedding_model is None:
+            logger.info(f"🔄 Loading embedding model: {self.embedding_model_name}")
+            from sentence_transformers import SentenceTransformer
+            self.embedding_model = SentenceTransformer(self.embedding_model_name)
+            logger.info("✅ Embedding model loaded successfully")
+
+    def _initialize_if_needed(self):
+        """Initialize the retriever if not already done."""
+        if not self._is_initialized:
+            if not self.load_embeddings():
+                self.create_embeddings()
+            self._is_initialized = True
 
     def create_embeddings(self):
         """Create embeddings for all table chunks and build a FAISS index."""
         logger.info("🔄 Creating embeddings for table chunks...")
-        if self.embedding_model is None:
-            self.load_embedding_model()
+        self.load_embedding_model()
 
         # Prepare texts for embedding
         texts_to_embed = []
@@ -206,54 +212,108 @@ class SchemaRetriever:
 
         # Generate embeddings
         embeddings = self.embedding_model.encode(texts_to_embed)
-        np.save(self.embeddings_file, embeddings)
+        self.embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)  # Normalize
+        
+        # Save embeddings
+        np.save(self.embeddings_file, self.embeddings)
 
         # Build FAISS index
-        dimension = embeddings.shape[1]
-        index = faiss.IndexFlatIP(dimension)  # Inner Product for cosine similarity
-        embeddings_normalized = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
-        index.add(embeddings_normalized)
-        faiss.write_index(index, self.faiss_index_file)
+        dimension = self.embeddings.shape[1]
+        self.faiss_index = faiss.IndexFlatIP(dimension)  # Inner Product for cosine similarity
+        self.faiss_index.add(self.embeddings.astype('float32'))
+        
+        # Save FAISS index
+        faiss.write_index(self.faiss_index, self.faiss_index_file)
 
+        # Save metadata
         with open(self.metadata_file, 'w') as f:
             json.dump({
                 "table_names": [chunk["table"] for chunk in self.table_chunks],
-                "embedding_dim": embeddings.shape[1],
+                "embedding_dim": self.embeddings.shape[1],
                 "num_tables": len(self.table_chunks)
             }, f)
 
-        self.embeddings = embeddings_normalized
         logger.info(f"✅ Created and saved embeddings for {len(self.table_chunks)} tables")
 
     def load_embeddings(self):
         """Load existing embeddings and FAISS index from files."""
-        if os.path.exists(self.embeddings_file) and os.path.exists(self.metadata_file) and os.path.exists(self.faiss_index_file):
-            self.embeddings = np.load(self.embeddings_file)
-            self.faiss_index = faiss.read_index(self.faiss_index_file)
-            with open(self.metadata_file, 'r') as f:
-                metadata = json.load(f)
-            logger.info(f"✅ Loaded embeddings and FAISS index for {metadata['num_tables']} tables")
-            return True
+        try:
+            if (os.path.exists(self.embeddings_file) and 
+                os.path.exists(self.metadata_file) and 
+                os.path.exists(self.faiss_index_file)):
+                
+                self.embeddings = np.load(self.embeddings_file)
+                self.faiss_index = faiss.read_index(self.faiss_index_file)
+                
+                with open(self.metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                
+                logger.info(f"✅ Loaded embeddings and FAISS index for {metadata['num_tables']} tables")
+                return True
+        except Exception as e:
+            logger.warning(f"Failed to load existing embeddings: {e}")
+            # Clean up partial files
+            for file_path in [self.embeddings_file, self.metadata_file, self.faiss_index_file]:
+                if os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except:
+                        pass
         return False
 
     def retrieve_relevant_tables(self, question: str, top_k: int = 3) -> List[Dict]:
         """Retrieve top-k most relevant tables using FAISS."""
-        if self.embeddings is None or self.faiss_index is None:
-            if not self.load_embeddings():
-                self.create_embeddings()
-        if self.embedding_model is None:
-            self.load_embedding_model()
+        self._initialize_if_needed()
+        self.load_embedding_model()
 
         # Create embedding for the question
         question_embedding = self.embedding_model.encode([question])
         question_embedding_normalized = question_embedding / np.linalg.norm(question_embedding, axis=1, keepdims=True)
 
         # Perform similarity search using FAISS
-        D, I = self.faiss_index.search(question_embedding_normalized, k=top_k)
+        try:
+            D, I = self.faiss_index.search(question_embedding_normalized.astype('float32'), k=min(top_k, len(self.table_chunks)))
+            
+            # Return relevant table chunks
+            relevant_tables = [self.table_chunks[i] for i in I[0] if i < len(self.table_chunks)]
+            logger.info(f"Retrieved {len(relevant_tables)} relevant tables: {[t['table'] for t in relevant_tables]}")
+            return relevant_tables
+        except Exception as e:
+            logger.error(f"Error during FAISS search: {e}")
+            # Fallback to simple keyword matching
+            return self._fallback_retrieval(question, top_k)
 
-        # Return relevant table chunks
-        relevant_tables = [self.table_chunks[i] for i in I[0]]
-        logger.info(f"Retrieved {len(relevant_tables)} relevant tables: {[t['table'] for t in relevant_tables]}")
+    def _fallback_retrieval(self, question: str, top_k: int = 3) -> List[Dict]:
+        """Fallback retrieval method using simple keyword matching."""
+        logger.info("Using fallback keyword-based retrieval")
+        question_lower = question.lower()
+        scores = []
+        
+        for i, chunk in enumerate(self.table_chunks):
+            score = 0
+            # Check keywords
+            for keyword in chunk['keywords']:
+                if keyword.lower() in question_lower:
+                    score += 2
+            
+            # Check table name
+            table_name_parts = chunk['table'].split('.')[-1].split('_')
+            for part in table_name_parts:
+                if part.lower() in question_lower:
+                    score += 1
+            
+            # Check description
+            desc_words = chunk['description'].lower().split()
+            for word in desc_words:
+                if len(word) > 3 and word in question_lower:
+                    score += 0.5
+            
+            scores.append((score, i))
+        
+        # Sort by score and return top_k
+        scores.sort(reverse=True, key=lambda x: x[0])
+        relevant_tables = [self.table_chunks[i] for _, i in scores[:top_k]]
+        logger.info(f"Fallback retrieved {len(relevant_tables)} tables: {[t['table'] for t in relevant_tables]}")
         return relevant_tables
 
 # --- 4. Enhanced Prompt Engineering ---
@@ -470,6 +530,7 @@ def make_analysis_prompt(question: str, sql_query: str, sql_result: dict) -> str
                 data_summary += f" (showing 3 of {len(data)} rows)"
     else:
         data_summary = "No data returned or query failed"
+    
     return f"""<|system|>
 You are a concise data analyst. Provide a brief, direct answer with key insights only.
 <|end|>
@@ -511,6 +572,7 @@ def execute_sql(sql_query: str) -> Tuple[Dict[str, Any], float]:
     except requests.RequestException as e:
         logger.error(f"SQL execution API error: {e}")
         result = {"error": str(e), "status_code": getattr(e.response, 'status_code', 500) if hasattr(e, 'response') and e.response else 500}
+    
     execution_time = time.time() - start_time
     logger.info(f"SQL executed in {execution_time:.2f}s")
     return result, execution_time
@@ -555,25 +617,38 @@ def shutdown_event():
 
 @app.post("/generate-and-analyze-sql", response_model=QueryResponse)
 async def process_query(request: QueryRequest):
+    """Main endpoint to generate SQL, execute it, and analyze results."""
     total_start_time = time.time()
     loop = app.state.loop
+    
     try:
+        # Generate SQL using RAG
         sql_query, retrieved_tables, sql_generation_time = await loop.run_in_executor(
             executor, generate_sql_with_rag, request.question, app.state.retriever
         )
+        
         if not sql_query:
             raise HTTPException(status_code=400, detail="Failed to generate SQL query.")
+        
+        # Execute SQL
         sql_execution_result, sql_execution_time = await loop.run_in_executor(
             executor, execute_sql, sql_query
         )
+        
+        # Generate analysis
         llm_analysis, llm_analysis_time = await loop.run_in_executor(
             executor, analyze_results, request.question, sql_query, sql_execution_result
         )
+        
         total_processing_time = time.time() - total_start_time
+        
+        # Determine success
         is_successful = (
             sql_execution_result.get("success", False) or
             (sql_execution_result.get("data") is not None and "error" not in sql_execution_result)
         )
+        
+        # Prepare response
         response_data = {
             "success": is_successful,
             "question": request.question,
@@ -587,9 +662,13 @@ async def process_query(request: QueryRequest):
             "sql_execution_time": round(sql_execution_time, 2),
             "total_processing_time": round(total_processing_time, 2),
         }
+        
+        # Save to file
         file_saved = await loop.run_in_executor(executor, save_result_to_file, response_data)
         response_data["file_saved"] = file_saved
+        
         return QueryResponse(**response_data)
+        
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
@@ -636,6 +715,7 @@ async def memory_status():
         memory_info["gpu_memory_allocated"] = torch.cuda.memory_allocated() / 1e9
         memory_info["gpu_memory_reserved"] = torch.cuda.memory_reserved() / 1e9
         memory_info["gpu_memory_total"] = torch.cuda.get_device_properties(0).total_memory / 1e9
+    
     import psutil
     process = psutil.Process()
     memory_info["cpu_memory_mb"] = process.memory_info().rss / 1024 / 1024
