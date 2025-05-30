@@ -440,7 +440,7 @@ Provide a concise analysis in 2-3 sentences maximum.
         }
         
         # Save to file
-        file_saved = await loop.run_in_executor(executor, save_result_to_file, response_data)
+        file_saved = await loop.run_in_executor(executor, save_result_to_file, response_data, SAVE_PATH)
         response_data["file_saved"] = file_saved
         
         return response_data
