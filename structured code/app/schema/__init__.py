@@ -5,6 +5,9 @@ Contains table definitions, join conditions, and T-SQL rules for the insurance d
 
 from typing import List, Dict, Any
 
+# filepath: c:\text_to_sql\sql\code\structured code\app\schema\__init__.py
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
 # Schema Information as Table Chunks
 TABLE_CHUNKS: List[Dict[str, Any]] = [
     {
