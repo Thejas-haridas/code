@@ -41,9 +41,3 @@ You can then access the API at `http://localhost:8000`.
 - **/generate-and-analyze-sql**: Generates SQL queries based on user questions and analyzes the results.
 - **/health**: Checks the health status of the application.
 - **/generate-sql-only**: Generates SQL queries without executing or analyzing them.
-
-## Contributing
-Contributions are welcome! Please submit a pull request or open an issue for any enhancements or bug fixes.
-
-## License
-This project is licensed under the MIT License. See the LICENSE file for more details.
