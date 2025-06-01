@@ -343,6 +343,7 @@ Generate a T-SQL query for Azure SQL Server/SQL Server that answers the followin
 - Return only the SQL query without explanations
 ### T-SQL Query
 ```sql
+return only T-sql query only and nothing else
 """
     return prompt
 
