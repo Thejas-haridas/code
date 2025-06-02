@@ -316,7 +316,6 @@ class SchemaRetriever:
         logger.info(f"Fallback retrieved {len(relevant_tables)} tables: {[t['table'] for t in relevant_tables]}")
         return relevant_tables
 
-# --- 4. Enhanced Prompt Engineering ---
 def construct_rag_prompt(question: str, relevant_tables: List[Dict]) -> str:
     """Creates a structured prompt using retrieved schema elements."""
     schema_section = ""
@@ -326,24 +325,28 @@ TABLE: {table_info['table']}
 Description: {table_info['description']}
 Columns: {', '.join(table_info['columns'])}
 """
+    
     prompt = f"""### Task
 Generate a T-SQL query for Azure SQL Server/SQL Server that answers the following question using only the provided relevant schema information.
+
 ### Retrieved Schema Information
 {schema_section}
 {JOIN_CONDITIONS}
+
 {TSQL_RULES}
+
 ### Question
 {question}
+
 ### Instructions
 - Use ONLY the tables and columns provided in the retrieved schema above
 - Write clean, efficient T-SQL code with appropriate WHERE clauses for performance
 - Use meaningful table aliases (e.g., dc for dim_claims, dp for dim_policy)
-- Add comments for complex logic if needed
-- Ensure all column references are valid according to the provided schema
-- Return only the SQL query without explanations
-###return only T-sql query only and nothing else
-### T-SQL Query
-```sql
+- Return ONLY the SQL query without any explanations, comments, or additional text
+- Do not include any markdown formatting or code block markers
+- Do not provide any analysis or explanation after the query
+
+### T-SQL Query:
 """
     return prompt
 
