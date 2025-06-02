@@ -523,37 +523,62 @@ def clean_tsql_query(sql_query: str) -> str:
         result = result[:-1]
     return result
 
-# def generate_sql_with_rag(question: str, retriever: SchemaRetriever) -> Tuple[str, List[str], float]:
-#     """Generates SQL query using RAG approach with schema retrieval."""
-#     start_time = time.time()
-#     relevant_tables = retriever.retrieve_relevant_tables(question, top_k=3)
-#     retrieved_table_names = [table['table'] for table in relevant_tables]
-#     prompt = construct_rag_prompt(question, relevant_tables)
-#     response = generate_text_optimized(prompt, app.state.sql_model, app.state.sql_tokenizer, max_new_tokens=300)
-#     sql_query = extract_sql_from_response(response)
-#     generation_time = time.time() - start_time
-#     logger.info(f"SQL generated with RAG in {generation_time:.2f}s using tables: {retrieved_table_names}")
-#     return sql_query, retrieved_table_names, generation_time
-
-def generate_sql_with_rag(question: str, retriever: SchemaRetriever) -> Tuple[str, List[str], float, float]:
-    """Generates SQL query using RAG approach with schema retrieval."""
-    # Measure retrieval time separately
+def generate_sql_with_rag_with_retry(
+    question: str,
+    retriever: SchemaRetriever,
+) -> Tuple[str, List[str], float, float]:
+    """Generates SQL query using RAG approach with retry on failure up to 3 times."""
     retrieval_start_time = time.time()
     relevant_tables = retriever.retrieve_relevant_tables(question, top_k=3)
     retrieved_table_names = [table['table'] for table in relevant_tables]
     retrieval_time = time.time() - retrieval_start_time
-    
-    # Measure SQL generation time separately
-    sql_generation_start_time = time.time()
-    prompt = construct_rag_prompt(question, relevant_tables)
-    response = generate_text_optimized(prompt, app.state.sql_model, app.state.sql_tokenizer, max_new_tokens=300)
-    sql_query = extract_sql_from_response(response)
-    sql_generation_time = time.time() - sql_generation_start_time
-    
     logger.info(f"Schema retrieval completed in {retrieval_time:.2f}s using tables: {retrieved_table_names}")
-    logger.info(f"SQL generation completed in {sql_generation_time:.2f}s")
-    
-    return sql_query, retrieved_table_names, retrieval_time, sql_generation_time
+
+    sql_query = ""
+    total_generation_time = 0.0
+
+    max_retries = 3
+
+    for attempt in range(1, max_retries + 1):
+        sql_generation_start_time = time.time()
+        prompt = construct_rag_prompt(question, relevant_tables)
+        response = generate_text_optimized(prompt, app.state.sql_model, app.state.sql_tokenizer, max_new_tokens=300)
+        sql_query = extract_sql_from_response(response)
+        sql_generation_time = time.time() - sql_generation_start_time
+        total_generation_time += sql_generation_time
+
+        # Check if SQL seems valid
+        if sql_query.strip().upper().startswith(("SELECT", "WITH", "INSERT", "UPDATE", "DELETE")):
+            logger.info(f"Valid SQL generated in attempt {attempt}")
+            return sql_query, retrieved_table_names, retrieval_time, total_generation_time
+        else:
+            logger.warning(f"Attempt {attempt} failed. Generated SQL was invalid:\n{sql_query}")
+            if attempt < max_retries:
+                # Build feedback prompt for correction
+                feedback_prompt = f"""
+<|system|>
+The previous SQL generation failed. Please correct it based on the error below.
+<|end|>
+<|user|>
+Original Question: {question}
+
+Previous Error: Invalid SQL syntax or missing SELECT/WITH/INSERT/UPDATE/DELETE clause.
+
+Generated SQL:
+{sql_query}
+
+Please regenerate a valid T-SQL query based on the schema information:
+{construct_rag_prompt(question, relevant_tables)}
+<|end|>
+<|assistant|>
+"""
+                logger.info(f"Retrying SQL generation (attempt {attempt + 1}) with feedback...")
+                # Use feedback prompt instead of original
+                response = generate_text_optimized(feedback_prompt, app.state.sql_model, app.state.sql_tokenizer, max_new_tokens=300)
+                sql_query = extract_sql_from_response(response)
+
+    logger.error("Failed to generate valid SQL after 3 retries.")
+    return "Query could not be executed.", retrieved_table_names, retrieval_time, total_generation_time
 
 
 def make_analysis_prompt(question: str, sql_query: str, sql_result: dict) -> str:
@@ -679,7 +704,7 @@ async def process_query(request: QueryRequest):
     try:
         # Generate SQL using RAG - now returns separate timing measurements
         sql_query, retrieved_tables, retrieval_time, sql_generation_time = await loop.run_in_executor(
-            executor, generate_sql_with_rag, request.question, app.state.retriever
+            executor, generate_sql_with_rag_with_retry, request.question, app.state.retriever
         )
         
         if not sql_query:
@@ -733,7 +758,7 @@ async def generate_sql_only(request: QueryRequest):
     """Generate SQL query without execution or analysis using RAG."""
     try:
         sql_query, retrieved_tables, retrieval_time, sql_generation_time = await app.state.loop.run_in_executor(
-            executor, generate_sql_with_rag, request.question, app.state.retriever
+            executor, generate_sql_with_rag_with_retry, request.question, app.state.retriever
         )
         return {
             "question": request.question,
