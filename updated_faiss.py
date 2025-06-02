@@ -170,6 +170,8 @@ class QueryResponse(BaseModel):
     sql_execution_time: float
     total_processing_time: float
     file_saved: str
+    retry_attempts: List[dict] = []  # New field for retry information
+    total_attempts: int = 1  # New field for total attempts made
 
 # --- 3. RAG Schema Retrieval System with FAISS (FIXED) ---
 class SchemaRetriever:
@@ -349,6 +351,115 @@ Generate a T-SQL query for Azure SQL Server/SQL Server that answers the followin
 ### T-SQL Query:
 """
     return prompt
+
+def construct_retry_prompt(question: str, relevant_tables: List[Dict], previous_sql: str, error_message: str, attempt_number: int) -> str:
+    """Creates a retry prompt that includes the previous SQL error for correction."""
+    schema_section = ""
+    for table_info in relevant_tables:
+        schema_section += f"""
+TABLE: {table_info['table']}
+Description: {table_info['description']}
+Columns: {', '.join(table_info['columns'])}
+"""
+    
+    prompt = f"""### Task
+Generate a corrected T-SQL query for Azure SQL Server/SQL Server. The previous attempt failed with an error.
+
+### Retrieved Schema Information
+{schema_section}
+{JOIN_CONDITIONS}
+
+{TSQL_RULES}
+
+### Question
+{question}
+
+### Previous Attempt (Failed)
+SQL Query:
+{previous_sql}
+
+Error Message:
+{error_message}
+
+### Instructions for Retry (Attempt {attempt_number + 1})
+- Analyze the error message and fix the specific issue in the previous SQL
+- Use ONLY the tables and columns provided in the retrieved schema above
+- Write clean, efficient T-SQL code with appropriate WHERE clauses for performance
+- Use meaningful table aliases (e.g., dc for dim_claims, dp for dim_policy)
+- Pay special attention to:
+  * Column name spelling and existence
+  * Proper JOIN conditions
+  * Date format requirements
+  * T-SQL syntax compliance
+- Return ONLY the corrected SQL query without any explanations, comments, or additional text
+- Do not include any markdown formatting or code block markers
+
+### Corrected T-SQL Query:
+"""
+    return prompt
+
+
+# --- Updated function: Replace the existing process_query endpoint function ---
+@app.post("/generate-and-analyze-sql", response_model=QueryResponse)
+async def process_query(request: QueryRequest):
+    """Main endpoint to generate SQL, execute it, and analyze results with retry logic."""
+    total_start_time = time.time()
+    loop = app.state.loop
+    
+    try:
+        # Generate SQL using RAG with retry logic
+        sql_query, retrieved_tables, retrieval_time, sql_generation_time, retry_attempts = await loop.run_in_executor(
+            executor, generate_sql_with_rag_with_retry, request.question, app.state.retriever, 2  # max 2 retries
+        )
+        
+        if not sql_query:
+            raise HTTPException(status_code=400, detail="Failed to generate SQL query after all attempts.")
+        
+        # Execute SQL (final execution for response)
+        sql_execution_result, sql_execution_time = await loop.run_in_executor(
+            executor, execute_sql, sql_query
+        )
+        
+        # Generate analysis
+        llm_analysis, llm_analysis_time = await loop.run_in_executor(
+            executor, analyze_results, request.question, sql_query, sql_execution_result
+        )
+        
+        total_processing_time = time.time() - total_start_time
+        
+        # Determine success
+        is_successful = (
+            sql_execution_result.get("success", False) or
+            (sql_execution_result.get("data") is not None and "error" not in sql_execution_result)
+        )
+        
+        # Prepare response with retry information
+        response_data = {
+            "success": is_successful,
+            "question": request.question,
+            "retrieved_tables": retrieved_tables,
+            "generated_sql": sql_query,
+            "sql_execution_result": sql_execution_result,
+            "llm_analysis": llm_analysis,
+            "retrieval_time": round(retrieval_time, 2),
+            "sql_generation_time": round(sql_generation_time, 2),
+            "llm_analysis_time": round(llm_analysis_time, 2),
+            "sql_execution_time": round(sql_execution_time, 2),
+            "total_processing_time": round(total_processing_time, 2),
+            "retry_attempts": retry_attempts,  # Add retry information
+            "total_attempts": len(retry_attempts) + 1 if not retry_attempts or not is_successful else 1
+        }
+        
+        # Save to file
+        file_saved = await loop.run_in_executor(executor, save_result_to_file, response_data)
+        response_data["file_saved"] = file_saved
+        
+        return QueryResponse(**response_data)
+        
+    except Exception as e:
+        logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
 
 # --- 5. Device and Model Loading (Enhanced) ---
 def setup_device() -> torch.device:
@@ -535,25 +646,68 @@ def clean_tsql_query(sql_query: str) -> str:
 #     logger.info(f"SQL generated with RAG in {generation_time:.2f}s using tables: {retrieved_table_names}")
 #     return sql_query, retrieved_table_names, generation_time
 
-def generate_sql_with_rag(question: str, retriever: SchemaRetriever) -> Tuple[str, List[str], float, float]:
-    """Generates SQL query using RAG approach with schema retrieval."""
-    # Measure retrieval time separately
+def generate_sql_with_rag_with_retry(question: str, retriever: SchemaRetriever, max_retries: int = 2) -> Tuple[str, List[str], float, float, List[str]]:
+    """Generates SQL query using RAG approach with error-based retry logic."""
+    # Measure retrieval time separately (only done once)
     retrieval_start_time = time.time()
     relevant_tables = retriever.retrieve_relevant_tables(question, top_k=3)
     retrieved_table_names = [table['table'] for table in relevant_tables]
     retrieval_time = time.time() - retrieval_start_time
     
-    # Measure SQL generation time separately
-    sql_generation_start_time = time.time()
-    prompt = construct_rag_prompt(question, relevant_tables)
-    response = generate_text_optimized(prompt, app.state.sql_model, app.state.sql_tokenizer, max_new_tokens=300)
-    sql_query = extract_sql_from_response(response)
-    sql_generation_time = time.time() - sql_generation_start_time
+    retry_attempts = []
+    total_sql_generation_time = 0.0
     
-    logger.info(f"Schema retrieval completed in {retrieval_time:.2f}s using tables: {retrieved_table_names}")
-    logger.info(f"SQL generation completed in {sql_generation_time:.2f}s")
+    for attempt in range(max_retries + 1):  # 3 total attempts (initial + 2 retries)
+        # Measure SQL generation time for this attempt
+        sql_generation_start_time = time.time()
+        
+        if attempt == 0:
+            # First attempt - use original prompt
+            prompt = construct_rag_prompt(question, relevant_tables)
+        else:
+            # Retry attempts - include previous error information
+            previous_error = retry_attempts[-1]['error']
+            previous_sql = retry_attempts[-1]['sql_query']
+            prompt = construct_retry_prompt(question, relevant_tables, previous_sql, previous_error, attempt)
+        
+        response = generate_text_optimized(prompt, app.state.sql_model, app.state.sql_tokenizer, max_new_tokens=300)
+        sql_query = extract_sql_from_response(response)
+        
+        attempt_sql_generation_time = time.time() - sql_generation_start_time
+        total_sql_generation_time += attempt_sql_generation_time
+        
+        # Test the generated SQL by executing it
+        sql_result, _ = execute_sql(sql_query)
+        
+        if sql_result.get("success") or (sql_result.get("data") is not None and "error" not in sql_result):
+            # SQL executed successfully
+            logger.info(f"SQL generated successfully on attempt {attempt + 1}")
+            logger.info(f"Schema retrieval completed in {retrieval_time:.2f}s using tables: {retrieved_table_names}")
+            logger.info(f"Total SQL generation time: {total_sql_generation_time:.2f}s across {attempt + 1} attempts")
+            return sql_query, retrieved_table_names, retrieval_time, total_sql_generation_time, retry_attempts
+        else:
+            # SQL execution failed, record the attempt
+            error_message = sql_result.get("error", "Unknown SQL execution error")
+            retry_info = {
+                "attempt": attempt + 1,
+                "sql_query": sql_query,
+                "error": error_message,
+                "generation_time": attempt_sql_generation_time
+            }
+            retry_attempts.append(retry_info)
+            
+            logger.warning(f"SQL attempt {attempt + 1} failed: {error_message}")
+            
+            if attempt == max_retries:
+                # Final attempt failed, return the latest query anyway
+                logger.error(f"All {max_retries + 1} SQL generation attempts failed")
+                logger.info(f"Schema retrieval completed in {retrieval_time:.2f}s using tables: {retrieved_table_names}")
+                logger.info(f"Total SQL generation time: {total_sql_generation_time:.2f}s across {attempt + 1} attempts")
+                return sql_query, retrieved_table_names, retrieval_time, total_sql_generation_time, retry_attempts
     
-    return sql_query, retrieved_table_names, retrieval_time, sql_generation_time
+    # This should never be reached, but just in case
+    return sql_query, retrieved_table_names, retrieval_time, total_sql_generation_time, retry_attempts
+
 
 
 def make_analysis_prompt(question: str, sql_query: str, sql_result: dict) -> str:
@@ -714,10 +868,10 @@ async def process_query(request: QueryRequest):
 
 @app.post("/generate-sql-only")
 async def generate_sql_only(request: QueryRequest):
-    """Generate SQL query without execution or analysis using RAG."""
+    """Generate SQL query without execution or analysis using RAG with retry logic."""
     try:
-        sql_query, retrieved_tables, retrieval_time, sql_generation_time = await app.state.loop.run_in_executor(
-            executor, generate_sql_with_rag, request.question, app.state.retriever
+        sql_query, retrieved_tables, retrieval_time, sql_generation_time, retry_attempts = await app.state.loop.run_in_executor(
+            executor, generate_sql_with_rag_with_retry, request.question, app.state.retriever, 2  # max 2 retries
         )
         return {
             "question": request.question,
@@ -725,11 +879,14 @@ async def generate_sql_only(request: QueryRequest):
             "generated_sql": sql_query,
             "retrieval_time": round(retrieval_time, 2),
             "sql_generation_time": round(sql_generation_time, 2),
-            "total_generation_time": round(retrieval_time + sql_generation_time, 2)
+            "total_generation_time": round(retrieval_time + sql_generation_time, 2),
+            "retry_attempts": retry_attempts,
+            "total_attempts": len(retry_attempts) + 1 if retry_attempts else 1
         }
     except Exception as e:
         logger.error(f"SQL generation error: {e}")
         raise HTTPException(status_code=500, detail=f"SQL generation failed: {str(e)}")
+
 
 @app.get("/health")
 async def health_check():
