@@ -1,10 +1,1 @@
-FastAPI
-torch
-numpy
-requests
-transformers
-sentence-transformers
-faiss-cpu
-pydantic
-uvicorn
-psutil
+
