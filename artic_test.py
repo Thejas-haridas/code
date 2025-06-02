@@ -506,17 +506,38 @@ def clean_tsql_query(sql_query: str) -> str:
         result = result[:-1]
     return result
 
-def generate_sql_with_rag(question: str, retriever: SchemaRetriever) -> Tuple[str, List[str], float]:
+# def generate_sql_with_rag(question: str, retriever: SchemaRetriever) -> Tuple[str, List[str], float]:
+#     """Generates SQL query using RAG approach with schema retrieval."""
+#     start_time = time.time()
+#     relevant_tables = retriever.retrieve_relevant_tables(question, top_k=3)
+#     retrieved_table_names = [table['table'] for table in relevant_tables]
+#     prompt = construct_rag_prompt(question, relevant_tables)
+#     response = generate_text_optimized(prompt, app.state.sql_model, app.state.sql_tokenizer, max_new_tokens=300)
+#     sql_query = extract_sql_from_response(response)
+#     generation_time = time.time() - start_time
+#     logger.info(f"SQL generated with RAG in {generation_time:.2f}s using tables: {retrieved_table_names}")
+#     return sql_query, retrieved_table_names, generation_time
+
+def generate_sql_with_rag(question: str, retriever: SchemaRetriever) -> Tuple[str, List[str], float, float]:
     """Generates SQL query using RAG approach with schema retrieval."""
-    start_time = time.time()
+    # Measure retrieval time separately
+    retrieval_start_time = time.time()
     relevant_tables = retriever.retrieve_relevant_tables(question, top_k=3)
     retrieved_table_names = [table['table'] for table in relevant_tables]
+    retrieval_time = time.time() - retrieval_start_time
+    
+    # Measure SQL generation time separately
+    sql_generation_start_time = time.time()
     prompt = construct_rag_prompt(question, relevant_tables)
     response = generate_text_optimized(prompt, app.state.sql_model, app.state.sql_tokenizer, max_new_tokens=300)
     sql_query = extract_sql_from_response(response)
-    generation_time = time.time() - start_time
-    logger.info(f"SQL generated with RAG in {generation_time:.2f}s using tables: {retrieved_table_names}")
-    return sql_query, retrieved_table_names, generation_time
+    sql_generation_time = time.time() - sql_generation_start_time
+    
+    logger.info(f"Schema retrieval completed in {retrieval_time:.2f}s using tables: {retrieved_table_names}")
+    logger.info(f"SQL generation completed in {sql_generation_time:.2f}s")
+    
+    return sql_query, retrieved_table_names, retrieval_time, sql_generation_time
+
 
 def make_analysis_prompt(question: str, sql_query: str, sql_result: dict) -> str:
     """Creates a streamlined prompt for Phi-3-mini to analyze SQL results."""
@@ -623,8 +644,8 @@ async def process_query(request: QueryRequest):
     loop = app.state.loop
     
     try:
-        # Generate SQL using RAG
-        sql_query, retrieved_tables, sql_generation_time = await loop.run_in_executor(
+        # Generate SQL using RAG - now returns separate timing measurements
+        sql_query, retrieved_tables, retrieval_time, sql_generation_time = await loop.run_in_executor(
             executor, generate_sql_with_rag, request.question, app.state.retriever
         )
         
@@ -649,7 +670,7 @@ async def process_query(request: QueryRequest):
             (sql_execution_result.get("data") is not None and "error" not in sql_execution_result)
         )
         
-        # Prepare response
+        # Prepare response with correct timing measurements
         response_data = {
             "success": is_successful,
             "question": request.question,
@@ -657,8 +678,8 @@ async def process_query(request: QueryRequest):
             "generated_sql": sql_query,
             "sql_execution_result": sql_execution_result,
             "llm_analysis": llm_analysis,
-            "retrieval_time": round(sql_generation_time, 2),
-            "sql_generation_time": round(sql_generation_time, 2),
+            "retrieval_time": round(retrieval_time, 2),  # Now correctly shows only retrieval time
+            "sql_generation_time": round(sql_generation_time, 2),  # Now correctly shows only SQL generation time
             "llm_analysis_time": round(llm_analysis_time, 2),
             "sql_execution_time": round(sql_execution_time, 2),
             "total_processing_time": round(total_processing_time, 2),
@@ -673,6 +694,25 @@ async def process_query(request: QueryRequest):
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
+@app.post("/generate-sql-only")
+async def generate_sql_only(request: QueryRequest):
+    """Generate SQL query without execution or analysis using RAG."""
+    try:
+        sql_query, retrieved_tables, retrieval_time, sql_generation_time = await app.state.loop.run_in_executor(
+            executor, generate_sql_with_rag, request.question, app.state.retriever
+        )
+        return {
+            "question": request.question,
+            "retrieved_tables": retrieved_tables,
+            "generated_sql": sql_query,
+            "retrieval_time": round(retrieval_time, 2),
+            "sql_generation_time": round(sql_generation_time, 2),
+            "total_generation_time": round(retrieval_time + sql_generation_time, 2)
+        }
+    except Exception as e:
+        logger.error(f"SQL generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"SQL generation failed: {str(e)}")
 
 @app.get("/health")
 async def health_check():
@@ -691,22 +731,22 @@ async def root():
     return {"message": "RAG-Enhanced SQL Generation and Analysis API is running with intelligent schema retrieval."}
 
 # --- 8. Additional Utility Endpoints ---
-@app.post("/generate-sql-only")
-async def generate_sql_only(request: QueryRequest):
-    """Generate SQL query without execution or analysis using RAG."""
-    try:
-        sql_query, retrieved_tables, generation_time = await app.state.loop.run_in_executor(
-            executor, generate_sql_with_rag, request.question, app.state.retriever
-        )
-        return {
-            "question": request.question,
-            "retrieved_tables": retrieved_tables,
-            "generated_sql": sql_query,
-            "generation_time": round(generation_time, 2)
-        }
-    except Exception as e:
-        logger.error(f"SQL generation error: {e}")
-        raise HTTPException(status_code=500, detail=f"SQL generation failed: {str(e)}")
+# @app.post("/generate-sql-only")
+# async def generate_sql_only(request: QueryRequest):
+#     """Generate SQL query without execution or analysis using RAG."""
+#     try:
+#         sql_query, retrieved_tables, generation_time = await app.state.loop.run_in_executor(
+#             executor, generate_sql_with_rag, request.question, app.state.retriever
+#         )
+#         return {
+#             "question": request.question,
+#             "retrieved_tables": retrieved_tables,
+#             "generated_sql": sql_query,
+#             "generation_time": round(generation_time, 2)
+#         }
+#     except Exception as e:
+#         logger.error(f"SQL generation error: {e}")
+#         raise HTTPException(status_code=500, detail=f"SQL generation failed: {str(e)}")
 
 @app.get("/memory-status")
 async def memory_status():
