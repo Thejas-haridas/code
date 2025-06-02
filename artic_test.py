@@ -341,9 +341,9 @@ Generate a T-SQL query for Azure SQL Server/SQL Server that answers the followin
 - Add comments for complex logic if needed
 - Ensure all column references are valid according to the provided schema
 - Return only the SQL query without explanations
+###return only T-sql query only and nothing else
 ### T-SQL Query
 ```sql
-return only T-sql query only and nothing else
 """
     return prompt
 
