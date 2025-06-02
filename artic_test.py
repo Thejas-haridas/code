@@ -426,6 +426,46 @@ def inference_mode():
         else:
             yield
 
+def generate_text_optimized(prompt: str, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, max_new_tokens: int, temperature: float = 0.0) -> str:
+    """Highly optimized text generation function."""
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
+    model_device = next(model.parameters()).device
+    inputs = {k: v.to(model_device, non_blocking=True) for k, v in inputs.items()}
+    input_length = inputs['input_ids'].shape[1]
+    with inference_mode():
+        gen_kwargs = {
+            'input_ids': inputs['input_ids'],
+            'attention_mask': inputs.get('attention_mask'),
+            'max_new_tokens': max_new_tokens,
+            'do_sample': False,
+            'num_beams': 1,
+            'pad_token_id': tokenizer.eos_token_id,
+            # Disable cache for Phi-3 model to avoid compatibility issues
+            'use_cache': False if "phi-3" in model.config.model_type.lower() else True,
+        }
+        # Remove 'early_stopping' as it's not valid for all models
+        if temperature > 0:
+            gen_kwargs['temperature'] = temperature
+            gen_kwargs['do_sample'] = True
+        
+        # Try to generate with cache, fall back to without cache if error
+        try:
+            outputs = model.generate(**gen_kwargs)
+        except AttributeError as e:
+            if "get_max_length" in str(e):
+                # Disable cache and retry for models with cache compatibility issues
+                gen_kwargs['use_cache'] = False
+                outputs = model.generate(**gen_kwargs)
+            else:
+                raise
+    
+    new_tokens = outputs[0][input_length:]
+    generated_text = tokenizer.decode(new_tokens, skip_special_tokens=True)
+    del inputs, outputs, gen_kwargs
+    cleanup_memory()
+    return generated_text
+
+
 def extract_sql_from_response(response: str) -> str:
     """Extracts SQL code from the model's response with improved T-SQL parsing."""
     if "```sql" in response:
