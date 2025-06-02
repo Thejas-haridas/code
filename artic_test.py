@@ -436,11 +436,11 @@ def generate_text_optimized(prompt: str, model: AutoModelForCausalLM, tokenizer:
         gen_kwargs = {
             'input_ids': inputs['input_ids'],
             'attention_mask': inputs.get('attention_mask'),
-            'max_new_tokens': max_new_tokens,
+            #'max_new_tokens': max_new_tokens,
             'do_sample': False,
             'num_beams': 1,
             'pad_token_id': tokenizer.eos_token_id,
-            # 'use_cache': True,
+            'use_cache': True,
             'early_stopping': True,
         }
         if temperature > 0:
