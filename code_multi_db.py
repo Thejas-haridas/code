@@ -26,43 +26,67 @@ os.makedirs(EMBEDDINGS_PATH, exist_ok=True)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DB_PLATFORMS = {
+DB_PLATFORM_INFO = {
     "sqlserver": {
         "name": "SQL Server",
-        "rules": """
+        "dialect_rules": """
 - Use T-SQL syntax only
 - Use ISNULL() instead of COALESCE()
 - Use TOP instead of LIMIT
 - Use GETDATE() for current datetime
 - Use DATEPART(), YEAR(), MONTH(), DAY() for date functions
 - Use LEN() instead of LENGTH()
-        """
+        """,
+        "connection_template": {
+            "host": "localhost",
+            "port": 1433,
+            "username": "",
+            "password": "",
+            "database": "",
+            "driver": "{ODBC Driver 17 for SQL Server}"
+        },
+        "schema": {}  # Will be populated from TABLE_CHUNKS
     },
     "oracle": {
         "name": "Oracle",
-        "rules": """
+        "dialect_rules": """
 - Use Oracle PL/SQL syntax
 - Use NVL() instead of COALESCE()
 - Use ROWNUM instead of LIMIT
 - Use SYSDATE for current datetime
 - Use LENGTH() instead of LEN()
 - Use TO_CHAR(), TO_DATE() for date formatting
-        """
+        """,
+        "connection_template": {
+            "dsn": "",
+            "user": "",
+            "password": ""
+        },
+        "schema": {}
     },
     "snowflake": {
         "name": "Snowflake",
-        "rules": """
+        "dialect_rules": """
 - Use Snowflake SQL syntax
 - Use IFF() instead of IFNULL()/ISNULL()
 - Use LIMIT clause
 - Use CURRENT_TIMESTAMP for current datetime
 - Use ARRAY_AGG() for aggregation
 - Support semi-structured data types like VARIANT
-        """
+        """,
+        "connection_template": {
+            "account": "",
+            "user": "",
+            "password": "",
+            "warehouse": "",
+            "database": "",
+            "schema": ""
+        },
+        "schema": {}
     },
     "bigquery": {
         "name": "BigQuery",
-        "rules": """
+        "dialect_rules": """
 - Use BigQuery Standard SQL
 - Use IFNULL() instead of COALESCE()
 - Use LIMIT clause
@@ -70,10 +94,16 @@ DB_PLATFORMS = {
 - Use EXTRACT() for date parts
 - Support nested and repeated fields
 - Prefer CTEs over subqueries for clarity
-        """
+        """,
+        "connection_template": {
+            "project_id": "",
+            "dataset_id": "",
+            "table_id": "",
+            "credentials_path": ""
+        },
+        "schema": {}
     }
 }
-
 JOIN_CONDITIONS = """
 Join Conditions:
 - fact_claims_dtl.claim_reference_id = dim_claims.claim_reference_id AND fact_claims_dtl.org_id = dim_claims.org_id
