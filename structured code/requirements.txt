@@ -11,7 +11,7 @@ regex
 requests
 safetensors
 scikit-learn
-scipy==1.15.3
+scipy
 sentence-transformers
 setuptools
 sniffio
