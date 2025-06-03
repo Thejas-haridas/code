@@ -26,4 +26,4 @@ triton
 typing-inspection
 typing_extensions
 urllib3
-uvicorn==0.34.3
+uvicorn
