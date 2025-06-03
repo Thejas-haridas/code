@@ -868,7 +868,7 @@ async def process_query(request: QueryRequest):
             "total_attempts": len(retry_attempts) + 1 if not retry_attempts or not is_successful else 1
         }
         
-        file_saved = await loop.run_in_executor(executor, save_result_to_file, response_data)
+        file_saved = await loop.run_in_executor(None, save_result_to_file, response_data)
         response_data["file_saved"] = file_saved
         
         return QueryResponse(**response_data)
@@ -1002,3 +1002,7 @@ async def test_retrieval(request: QueryRequest):
     except Exception as e:
         logger.error(f"Retrieval test error: {e}")
         raise HTTPException(status_code=500, detail=f"Retrieval test failed: {str(e)}")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
