@@ -13,13 +13,15 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import requests
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-import faiss  # Import FAISS for efficient similarity search
+import faiss
+import pyodbc
+from sqlalchemy import create_engine, text
+import urllib
 
 # --- 1. Configuration ---
 SQL_MODEL_NAME = "defog/llama-3-sqlcoder-8b"
-ANALYSIS_MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"  # For analysis
-EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"  # For embeddings
-API_ENDPOINT = "http://172.200.64.182:7860/execute"  # API for SQL execution
+ANALYSIS_MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 SAVE_PATH = "/home/text_sql"
 EMBEDDINGS_PATH = "/home/text_sql/embeddings"
 os.makedirs(SAVE_PATH, exist_ok=True)
@@ -27,6 +29,9 @@ os.makedirs(EMBEDDINGS_PATH, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Session storage (in production, use Redis or database)
+active_sessions = {}
 
 # Schema Information as Table Chunks (unchanged from original)
 TABLE_CHUNKS = [
@@ -156,6 +161,7 @@ executor = ThreadPoolExecutor(max_workers=os.cpu_count() * 2)
 
 class QueryRequest(BaseModel):
     question: str
+    session_id: str = None
 
 class QueryResponse(BaseModel):
     success: bool
@@ -170,10 +176,21 @@ class QueryResponse(BaseModel):
     sql_execution_time: float
     total_processing_time: float
     file_saved: str
-    retry_attempts: List[dict] = []  # New field for retry information
-    total_attempts: int = 1  # New field for total attempts made
+    retry_attempts: List[dict] = []
+    total_attempts: int = 1
 
-# --- 3. RAG Schema Retrieval System with FAISS (FIXED) ---
+class SessionRequest(BaseModel):
+    credentials: dict
+    tables: Dict[str, bool]
+    table_descriptions: Dict[str, str]
+    column_descriptions: Dict[str, Dict[str, str]]
+
+class SessionResponse(BaseModel):
+    success: bool
+    message: str
+    session_id: str = None
+
+# --- 3. RAG Schema Retrieval System with FAISS ---
 class SchemaRetriever:
     def __init__(self, table_chunks: List[Dict], embedding_model_name: str):
         self.table_chunks = table_chunks
@@ -206,28 +223,20 @@ class SchemaRetriever:
         logger.info("🔄 Creating embeddings for table chunks...")
         self.load_embedding_model()
 
-        # Prepare texts for embedding
         texts_to_embed = []
         for chunk in self.table_chunks:
             combined_text = f"{chunk['text']} {chunk['description']} {' '.join(chunk['keywords'])}"
             texts_to_embed.append(combined_text)
 
-        # Generate embeddings
         embeddings = self.embedding_model.encode(texts_to_embed)
-        self.embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)  # Normalize
-        
-        # Save embeddings
+        self.embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
         np.save(self.embeddings_file, self.embeddings)
 
-        # Build FAISS index
         dimension = self.embeddings.shape[1]
-        self.faiss_index = faiss.IndexFlatIP(dimension)  # Inner Product for cosine similarity
+        self.faiss_index = faiss.IndexFlatIP(dimension)
         self.faiss_index.add(self.embeddings.astype('float32'))
-        
-        # Save FAISS index
         faiss.write_index(self.faiss_index, self.faiss_index_file)
 
-        # Save metadata
         with open(self.metadata_file, 'w') as f:
             json.dump({
                 "table_names": [chunk["table"] for chunk in self.table_chunks],
@@ -254,7 +263,6 @@ class SchemaRetriever:
                 return True
         except Exception as e:
             logger.warning(f"Failed to load existing embeddings: {e}")
-            # Clean up partial files
             for file_path in [self.embeddings_file, self.metadata_file, self.faiss_index_file]:
                 if os.path.exists(file_path):
                     try:
@@ -268,21 +276,16 @@ class SchemaRetriever:
         self._initialize_if_needed()
         self.load_embedding_model()
 
-        # Create embedding for the question
         question_embedding = self.embedding_model.encode([question])
         question_embedding_normalized = question_embedding / np.linalg.norm(question_embedding, axis=1, keepdims=True)
 
-        # Perform similarity search using FAISS
         try:
             D, I = self.faiss_index.search(question_embedding_normalized.astype('float32'), k=min(top_k, len(self.table_chunks)))
-            
-            # Return relevant table chunks
             relevant_tables = [self.table_chunks[i] for i in I[0] if i < len(self.table_chunks)]
             logger.info(f"Retrieved {len(relevant_tables)} relevant tables: {[t['table'] for t in relevant_tables]}")
             return relevant_tables
         except Exception as e:
             logger.error(f"Error during FAISS search: {e}")
-            # Fallback to simple keyword matching
             return self._fallback_retrieval(question, top_k)
 
     def _fallback_retrieval(self, question: str, top_k: int = 3) -> List[Dict]:
@@ -293,26 +296,19 @@ class SchemaRetriever:
         
         for i, chunk in enumerate(self.table_chunks):
             score = 0
-            # Check keywords
             for keyword in chunk['keywords']:
                 if keyword.lower() in question_lower:
                     score += 2
-            
-            # Check table name
             table_name_parts = chunk['table'].split('.')[-1].split('_')
             for part in table_name_parts:
                 if part.lower() in question_lower:
                     score += 1
-            
-            # Check description
             desc_words = chunk['description'].lower().split()
             for word in desc_words:
                 if len(word) > 3 and word in question_lower:
                     score += 0.5
-            
             scores.append((score, i))
         
-        # Sort by score and return top_k
         scores.sort(reverse=True, key=lambda x: x[0])
         relevant_tables = [self.table_chunks[i] for _, i in scores[:top_k]]
         logger.info(f"Fallback retrieved {len(relevant_tables)} tables: {[t['table'] for t in relevant_tables]}")
@@ -398,70 +394,7 @@ Error Message:
 """
     return prompt
 
-
-# --- Updated function: Replace the existing process_query endpoint function ---
-@app.post("/generate-and-analyze-sql", response_model=QueryResponse)
-async def process_query(request: QueryRequest):
-    """Main endpoint to generate SQL, execute it, and analyze results with retry logic."""
-    total_start_time = time.time()
-    loop = app.state.loop
-    
-    try:
-        # Generate SQL using RAG with retry logic
-        sql_query, retrieved_tables, retrieval_time, sql_generation_time, retry_attempts = await loop.run_in_executor(
-            executor, generate_sql_with_rag_with_retry, request.question, app.state.retriever, 2  # max 2 retries
-        )
-        
-        if not sql_query:
-            raise HTTPException(status_code=400, detail="Failed to generate SQL query after all attempts.")
-        
-        # Execute SQL (final execution for response)
-        sql_execution_result, sql_execution_time = await loop.run_in_executor(
-            executor, execute_sql, sql_query
-        )
-        
-        # Generate analysis
-        llm_analysis, llm_analysis_time = await loop.run_in_executor(
-            executor, analyze_results, request.question, sql_query, sql_execution_result
-        )
-        
-        total_processing_time = time.time() - total_start_time
-        
-        # Determine success
-        is_successful = (
-            sql_execution_result.get("success", False) or
-            (sql_execution_result.get("data") is not None and "error" not in sql_execution_result)
-        )
-        
-        # Prepare response with retry information
-        response_data = {
-            "success": is_successful,
-            "question": request.question,
-            "retrieved_tables": retrieved_tables,
-            "generated_sql": sql_query,
-            "sql_execution_result": sql_execution_result,
-            "llm_analysis": llm_analysis,
-            "retrieval_time": round(retrieval_time, 2),
-            "sql_generation_time": round(sql_generation_time, 2),
-            "llm_analysis_time": round(llm_analysis_time, 2),
-            "sql_execution_time": round(sql_execution_time, 2),
-            "total_processing_time": round(total_processing_time, 2),
-            "retry_attempts": retry_attempts,  # Add retry information
-            "total_attempts": len(retry_attempts) + 1 if not retry_attempts or not is_successful else 1
-        }
-        
-        # Save to file
-        file_saved = await loop.run_in_executor(executor, save_result_to_file, response_data)
-        response_data["file_saved"] = file_saved
-        
-        return QueryResponse(**response_data)
-        
-    except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
-
-
-# --- 5. Device and Model Loading (Enhanced) ---
+# --- 4. Device and Model Loading ---
 def setup_device() -> torch.device:
     """Setup and configure GPU/CPU device with optimizations."""
     if torch.cuda.is_available():
@@ -526,7 +459,7 @@ def load_analysis_model_and_tokenizer(device: torch.device) -> Tuple[AutoModelFo
     logger.info(f"🤖 Phi-3-mini analysis model loaded in {time.time() - load_start_time:.2f}s")
     return model, tokenizer
 
-# --- 6. Core Logic Functions (Enhanced) ---
+# --- 5. Core Logic Functions ---
 @contextmanager
 def inference_mode():
     """Context manager for optimized inference."""
@@ -551,20 +484,16 @@ def generate_text_optimized(prompt: str, model: AutoModelForCausalLM, tokenizer:
             'do_sample': False,
             'num_beams': 1,
             'pad_token_id': tokenizer.eos_token_id,
-            # Disable cache for Phi-3 model to avoid compatibility issues
             'use_cache': False if "phi-3" in model.config.model_type.lower() else True,
         }
-        # Remove 'early_stopping' as it's not valid for all models
         if temperature > 0:
             gen_kwargs['temperature'] = temperature
             gen_kwargs['do_sample'] = True
         
-        # Try to generate with cache, fall back to without cache if error
         try:
             outputs = model.generate(**gen_kwargs)
         except AttributeError as e:
             if "get_max_length" in str(e):
-                # Disable cache and retry for models with cache compatibility issues
                 gen_kwargs['use_cache'] = False
                 outputs = model.generate(**gen_kwargs)
             else:
@@ -575,7 +504,6 @@ def generate_text_optimized(prompt: str, model: AutoModelForCausalLM, tokenizer:
     del inputs, outputs, gen_kwargs
     cleanup_memory()
     return generated_text
-
 
 def extract_sql_from_response(response: str) -> str:
     """Extracts SQL code from the model's response with improved T-SQL parsing."""
@@ -634,21 +562,89 @@ def clean_tsql_query(sql_query: str) -> str:
         result = result[:-1]
     return result
 
-# def generate_sql_with_rag(question: str, retriever: SchemaRetriever) -> Tuple[str, List[str], float]:
-#     """Generates SQL query using RAG approach with schema retrieval."""
-#     start_time = time.time()
-#     relevant_tables = retriever.retrieve_relevant_tables(question, top_k=3)
-#     retrieved_table_names = [table['table'] for table in relevant_tables]
-#     prompt = construct_rag_prompt(question, relevant_tables)
-#     response = generate_text_optimized(prompt, app.state.sql_model, app.state.sql_tokenizer, max_new_tokens=300)
-#     sql_query = extract_sql_from_response(response)
-#     generation_time = time.time() - start_time
-#     logger.info(f"SQL generated with RAG in {generation_time:.2f}s using tables: {retrieved_table_names}")
-#     return sql_query, retrieved_table_names, generation_time
+def execute_sql_direct(sql_query: str, connection_string: str) -> Tuple[Dict[str, Any], float]:
+    """Executes SQL query directly using the provided connection string."""
+    start_time = time.time()
+    try:
+        engine = create_engine(connection_string)
+        
+        with engine.connect() as connection:
+            result = connection.execute(text(sql_query))
+            rows = result.fetchall()
+            columns = result.keys()
+            data = [dict(zip(columns, row)) for row in rows]
+            
+            execution_result = {
+                "success": True,
+                "data": data,
+                "row_count": len(data)
+            }
+            
+    except Exception as e:
+        logger.error(f"SQL execution error: {e}")
+        execution_result = {
+            "success": False,
+            "error": str(e),
+            "data": None
+        }
+    
+    execution_time = time.time() - start_time
+    logger.info(f"SQL executed in {execution_time:.2f}s")
+    return execution_result, execution_time
 
-def generate_sql_with_rag_with_retry(question: str, retriever: SchemaRetriever, max_retries: int = 2) -> Tuple[str, List[str], float, float, List[str]]:
-    """Generates SQL query using RAG approach with error-based retry logic."""
-    # Measure retrieval time separately (only done once)
+def build_connection_string(credentials: dict) -> str:
+    """Builds SQL Server connection string from credentials."""
+    try:
+        if credentials.get('driver', 'ODBC Driver 17 for SQL Server'):
+            conn_str = (
+                f"DRIVER={{{credentials.get('driver', 'ODBC Driver 17 for SQL Server')}}};"
+                f"SERVER={credentials['server']};"
+                f"DATABASE={credentials['database']};"
+            )
+            
+            if credentials.get('username') and credentials.get('password'):
+                conn_str += f"UID={credentials['username']};PWD={credentials['password']};"
+            else:
+                conn_str += "Trusted_Connection=yes;"
+            
+            params = urllib.parse.quote_plus(conn_str)
+            return f"mssql+pyodbc:///?odbc_connect={params}"
+        
+    except KeyError as e:
+        raise ValueError(f"Missing required credential: {e}")
+
+def create_dynamic_table_chunks(tables: Dict[str, bool], table_descriptions: Dict[str, str], 
+                               column_descriptions: Dict[str, Dict[str, str]]) -> List[Dict]:
+    """Creates table chunks based on user selection."""
+    dynamic_chunks = []
+    
+    for table_name, is_enabled in tables.items():
+        if not is_enabled:
+            continue
+            
+        description = table_descriptions.get(table_name, "No description available")
+        columns = list(column_descriptions.get(table_name, {}).keys())
+        keywords = []
+        keywords.extend(table_name.lower().split('_'))
+        keywords.extend(description.lower().split())
+        keywords = list(set([k for k in keywords if len(k) > 2]))
+        
+        chunk = {
+            "type": "table",
+            "table": table_name,
+            "text": f"Table: {table_name} | Columns: {', '.join(columns)}",
+            "description": description,
+            "columns": columns,
+            "keywords": keywords
+        }
+        
+        dynamic_chunks.append(chunk)
+    
+    return dynamic_chunks
+
+def generate_sql_with_rag_with_retry_session(question: str, retriever: SchemaRetriever, 
+                                           connection_string: str, max_retries: int = 2) -> Tuple[str, List[str], float, float, List[dict]]:
+    """Generates SQL query using RAG approach with error-based retry logic and direct execution."""
     retrieval_start_time = time.time()
     relevant_tables = retriever.retrieve_relevant_tables(question, top_k=3)
     retrieved_table_names = [table['table'] for table in relevant_tables]
@@ -657,15 +653,12 @@ def generate_sql_with_rag_with_retry(question: str, retriever: SchemaRetriever, 
     retry_attempts = []
     total_sql_generation_time = 0.0
     
-    for attempt in range(max_retries + 1):  # 3 total attempts (initial + 2 retries)
-        # Measure SQL generation time for this attempt
+    for attempt in range(max_retries + 1):
         sql_generation_start_time = time.time()
         
         if attempt == 0:
-            # First attempt - use original prompt
             prompt = construct_rag_prompt(question, relevant_tables)
         else:
-            # Retry attempts - include previous error information
             previous_error = retry_attempts[-1]['error']
             previous_sql = retry_attempts[-1]['sql_query']
             prompt = construct_retry_prompt(question, relevant_tables, previous_sql, previous_error, attempt)
@@ -676,17 +669,14 @@ def generate_sql_with_rag_with_retry(question: str, retriever: SchemaRetriever, 
         attempt_sql_generation_time = time.time() - sql_generation_start_time
         total_sql_generation_time += attempt_sql_generation_time
         
-        # Test the generated SQL by executing it
-        sql_result, _ = execute_sql(sql_query)
+        sql_result, _ = execute_sql_direct(sql_query, connection_string)
         
         if sql_result.get("success") or (sql_result.get("data") is not None and "error" not in sql_result):
-            # SQL executed successfully
             logger.info(f"SQL generated successfully on attempt {attempt + 1}")
             logger.info(f"Schema retrieval completed in {retrieval_time:.2f}s using tables: {retrieved_table_names}")
             logger.info(f"Total SQL generation time: {total_sql_generation_time:.2f}s across {attempt + 1} attempts")
             return sql_query, retrieved_table_names, retrieval_time, total_sql_generation_time, retry_attempts
         else:
-            # SQL execution failed, record the attempt
             error_message = sql_result.get("error", "Unknown SQL execution error")
             retry_info = {
                 "attempt": attempt + 1,
@@ -699,16 +689,12 @@ def generate_sql_with_rag_with_retry(question: str, retriever: SchemaRetriever, 
             logger.warning(f"SQL attempt {attempt + 1} failed: {error_message}")
             
             if attempt == max_retries:
-                # Final attempt failed, return the latest query anyway
                 logger.error(f"All {max_retries + 1} SQL generation attempts failed")
                 logger.info(f"Schema retrieval completed in {retrieval_time:.2f}s using tables: {retrieved_table_names}")
                 logger.info(f"Total SQL generation time: {total_sql_generation_time:.2f}s across {attempt + 1} attempts")
                 return sql_query, retrieved_table_names, retrieval_time, total_sql_generation_time, retry_attempts
     
-    # This should never be reached, but just in case
     return sql_query, retrieved_table_names, retrieval_time, total_sql_generation_time, retry_attempts
-
-
 
 def make_analysis_prompt(question: str, sql_query: str, sql_result: dict) -> str:
     """Creates a streamlined prompt for Phi-3-mini to analyze SQL results."""
@@ -750,26 +736,6 @@ def analyze_results(question: str, sql_query: str, sql_result: dict) -> Tuple[st
     logger.info(f"Analysis generated in {analysis_time:.2f}s using Phi-3-mini")
     return analysis.strip(), analysis_time
 
-def execute_sql(sql_query: str) -> Tuple[Dict[str, Any], float]:
-    """Executes SQL query via the external API."""
-    start_time = time.time()
-    try:
-        response = requests.post(
-            API_ENDPOINT,
-            json={"query": sql_query},
-            headers={"Content-Type": "application/json"},
-            timeout=60
-        )
-        response.raise_for_status()
-        result = response.json()
-    except requests.RequestException as e:
-        logger.error(f"SQL execution API error: {e}")
-        result = {"error": str(e), "status_code": getattr(e.response, 'status_code', 500) if hasattr(e, 'response') and e.response else 500}
-    
-    execution_time = time.time() - start_time
-    logger.info(f"SQL executed in {execution_time:.2f}s")
-    return result, execution_time
-
 def save_result_to_file(data: dict) -> str:
     """Saves the full transaction to a timestamped file."""
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -790,16 +756,15 @@ def cleanup_memory():
         torch.cuda.synchronize()
     gc.collect()
 
-# --- 7. FastAPI Application Events and Endpoints ---
+# --- 6. FastAPI Application Events and Endpoints ---
 @app.on_event("startup")
 async def startup_event():
     """Load both models on application startup."""
     app.state.device = setup_device()
-    app.state.retriever = SchemaRetriever(TABLE_CHUNKS, EMBEDDING_MODEL_NAME)
     app.state.sql_model, app.state.sql_tokenizer = load_sql_model_and_tokenizer(app.state.device)
     app.state.analysis_model, app.state.analysis_tokenizer = load_analysis_model_and_tokenizer(app.state.device)
     app.state.loop = asyncio.get_event_loop()
-    logger.info("🚀 RAG system and both models loaded successfully!")
+    logger.info("🚀 Models loaded successfully!")
 
 @app.on_event("shutdown")
 def shutdown_event():
@@ -808,40 +773,86 @@ def shutdown_event():
     executor.shutdown(wait=True)
     logger.info("🧹 Memory cleaned up and executor shut down.")
 
+@app.post("/start-session", response_model=SessionResponse)
+async def start_session(request: SessionRequest):
+    """Start a new session with connection string and table selection."""
+    try:
+        connection_string = build_connection_string(request.credentials)
+        
+        try:
+            engine = create_engine(connection_string)
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            logger.info("Database connection test successful")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Database connection failed: {str(e)}")
+        
+        import uuid
+        session_id = str(uuid.uuid4())
+        
+        table_chunks = create_dynamic_table_chunks(
+            request.tables, 
+            request.table_descriptions, 
+            request.column_descriptions
+        )
+        
+        if not table_chunks:
+            raise HTTPException(status_code=400, detail="No tables selected")
+        
+        active_sessions[session_id] = {
+            "connection_string": connection_string,
+            "table_chunks": table_chunks,
+            "created_at": time.time()
+        }
+        
+        return SessionResponse(
+            success=True,
+            message=f"Session started successfully with {len(table_chunks)} tables",
+            session_id=session_id
+        )
+        
+    except Exception as e:
+        logger.error(f"Session start error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start session: {str(e)}")
+
 @app.post("/generate-and-analyze-sql", response_model=QueryResponse)
 async def process_query(request: QueryRequest):
-    """Main endpoint to generate SQL, execute it, and analyze results."""
+    """Main endpoint to generate SQL, execute it, and analyze results with session support."""
+    if not request.session_id or request.session_id not in active_sessions:
+        raise HTTPException(status_code=400, detail="Invalid or missing session_id. Please start a session first.")
+    
+    session_data = active_sessions[request.session_id]
+    connection_string = session_data["connection_string"]
+    table_chunks = session_data["table_chunks"]
+    
     total_start_time = time.time()
     loop = app.state.loop
     
     try:
-        # Generate SQL using RAG - now returns separate timing measurements
-        sql_query, retrieved_tables, retrieval_time, sql_generation_time = await loop.run_in_executor(
-            executor, generate_sql_with_rag, request.question, app.state.retriever
+        temp_retriever = SchemaRetriever(table_chunks, EMBEDDING_MODEL_NAME)
+        
+        sql_query, retrieved_tables, retrieval_time, sql_generation_time, retry_attempts = await loop.run_in_executor(
+            executor, generate_sql_with_rag_with_retry_session, request.question, temp_retriever, connection_string, 2
         )
         
         if not sql_query:
-            raise HTTPException(status_code=400, detail="Failed to generate SQL query.")
+            raise HTTPException(status_code=400, detail="Failed to generate SQL query after all attempts.")
         
-        # Execute SQL
         sql_execution_result, sql_execution_time = await loop.run_in_executor(
-            executor, execute_sql, sql_query
+            executor, execute_sql_direct, sql_query, connection_string
         )
         
-        # Generate analysis
         llm_analysis, llm_analysis_time = await loop.run_in_executor(
             executor, analyze_results, request.question, sql_query, sql_execution_result
         )
         
         total_processing_time = time.time() - total_start_time
         
-        # Determine success
         is_successful = (
             sql_execution_result.get("success", False) or
             (sql_execution_result.get("data") is not None and "error" not in sql_execution_result)
         )
         
-        # Prepare response with correct timing measurements
         response_data = {
             "success": is_successful,
             "question": request.question,
@@ -849,14 +860,15 @@ async def process_query(request: QueryRequest):
             "generated_sql": sql_query,
             "sql_execution_result": sql_execution_result,
             "llm_analysis": llm_analysis,
-            "retrieval_time": round(retrieval_time, 2),  # Now correctly shows only retrieval time
-            "sql_generation_time": round(sql_generation_time, 2),  # Now correctly shows only SQL generation time
+            "retrieval_time": round(retrieval_time, 2),
+            "sql_generation_time": round(sql_generation_time, 2),
             "llm_analysis_time": round(llm_analysis_time, 2),
             "sql_execution_time": round(sql_execution_time, 2),
             "total_processing_time": round(total_processing_time, 2),
+            "retry_attempts": retry_attempts,
+            "total_attempts": len(retry_attempts) + 1 if not retry_attempts or not is_successful else 1
         }
         
-        # Save to file
         file_saved = await loop.run_in_executor(executor, save_result_to_file, response_data)
         response_data["file_saved"] = file_saved
         
@@ -869,9 +881,17 @@ async def process_query(request: QueryRequest):
 @app.post("/generate-sql-only")
 async def generate_sql_only(request: QueryRequest):
     """Generate SQL query without execution or analysis using RAG with retry logic."""
+    if not request.session_id or request.session_id not in active_sessions:
+        raise HTTPException(status_code=400, detail="Invalid or missing session_id. Please start a session first.")
+    
+    session_data = active_sessions[request.session_id]
+    connection_string = session_data["connection_string"]
+    table_chunks = session_data["table_chunks"]
+    
     try:
+        temp_retriever = SchemaRetriever(table_chunks, EMBEDDING_MODEL_NAME)
         sql_query, retrieved_tables, retrieval_time, sql_generation_time, retry_attempts = await app.state.loop.run_in_executor(
-            executor, generate_sql_with_rag_with_retry, request.question, app.state.retriever, 2  # max 2 retries
+            executor, generate_sql_with_rag_with_retry_session, request.question, temp_retriever, connection_string, 2
         )
         return {
             "question": request.question,
@@ -887,7 +907,6 @@ async def generate_sql_only(request: QueryRequest):
         logger.error(f"SQL generation error: {e}")
         raise HTTPException(status_code=500, detail=f"SQL generation failed: {str(e)}")
 
-
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
@@ -895,32 +914,33 @@ async def health_check():
         "status": "healthy",
         "sql_model_loaded": hasattr(app.state, 'sql_model'),
         "analysis_model_loaded": hasattr(app.state, 'analysis_model'),
-        "rag_retriever_loaded": hasattr(app.state, 'retriever'),
         "device": str(app.state.device) if hasattr(app.state, 'device') else "unknown"
     }
 
-@app.get("/", include_in_schema=False)
-async def root():
-    """Root endpoint."""
-    return {"message": "RAG-Enhanced SQL Generation and Analysis API is running with intelligent schema retrieval."}
+@app.get("/list-sessions")
+async def list_sessions():
+    """List all active sessions."""
+    sessions = []
+    current_time = time.time()
+    
+    for session_id, session_data in active_sessions.items():
+        sessions.append({
+            "session_id": session_id,
+            "created_at": session_data["created_at"],
+            "age_minutes": round((current_time - session_data["created_at"]) / 60, 2),
+            "table_count": len(session_data["table_chunks"])
+        })
+    
+    return {"active_sessions": sessions}
 
-# --- 8. Additional Utility Endpoints ---
-# @app.post("/generate-sql-only")
-# async def generate_sql_only(request: QueryRequest):
-#     """Generate SQL query without execution or analysis using RAG."""
-#     try:
-#         sql_query, retrieved_tables, generation_time = await app.state.loop.run_in_executor(
-#             executor, generate_sql_with_rag, request.question, app.state.retriever
-#         )
-#         return {
-#             "question": request.question,
-#             "retrieved_tables": retrieved_tables,
-#             "generated_sql": sql_query,
-#             "generation_time": round(generation_time, 2)
-#         }
-#     except Exception as e:
-#         logger.error(f"SQL generation error: {e}")
-#         raise HTTPException(status_code=500, detail=f"SQL generation failed: {str(e)}")
+@app.delete("/end-session/{session_id}")
+async def end_session(session_id: str):
+    """End a specific session."""
+    if session_id in active_sessions:
+        del active_sessions[session_id]
+        return {"message": f"Session {session_id} ended successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Session not found")
 
 @app.get("/memory-status")
 async def memory_status():
@@ -960,8 +980,15 @@ async def schema_info():
 @app.post("/test-retrieval")
 async def test_retrieval(request: QueryRequest):
     """Test the RAG retrieval system independently."""
+    if not request.session_id or request.session_id not in active_sessions:
+        raise HTTPException(status_code=400, detail="Invalid or missing session_id. Please start a session first.")
+    
+    session_data = active_sessions[request.session_id]
+    table_chunks = session_data["table_chunks"]
+    
     try:
-        relevant_tables = app.state.retriever.retrieve_relevant_tables(request.question, top_k=3)
+        temp_retriever = SchemaRetriever(table_chunks, EMBEDDING_MODEL_NAME)
+        relevant_tables = temp_retriever.retrieve_relevant_tables(request.question, top_k=3)
         return {
             "question": request.question,
             "retrieved_tables": [
