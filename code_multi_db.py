@@ -1002,7 +1002,3 @@ async def test_retrieval(request: QueryRequest):
     except Exception as e:
         logger.error(f"Retrieval test error: {e}")
         raise HTTPException(status_code=500, detail=f"Retrieval test failed: {str(e)}")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
