@@ -23,7 +23,7 @@ torch
 tqdm
 transformers
 triton
-typing-inspection
-typing_extensions
+#typing-inspection
+#typing_extensions
 urllib3
 uvicorn
