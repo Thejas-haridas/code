@@ -11,7 +11,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Tuple, Dict, Any, List
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import requests
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 import faiss
 import pyodbc
@@ -33,7 +32,7 @@ logger = logging.getLogger(__name__)
 # Session storage (in production, use Redis or database)
 active_sessions = {}
 
-# Schema Information as Table Chunks (unchanged from original)
+# Schema Information as Table Chunks
 TABLE_CHUNKS = [
     {
         "type": "table",
