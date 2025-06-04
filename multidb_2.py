@@ -970,36 +970,149 @@ async def test_retrieval(request: QueryRequest):
        logger.error(f"Retrieval test error: {e}")
        raise HTTPException(status_code=500, detail=f"Retrieval test failed: {str(e)}")
 
-@app.post("/create-session-request")
-async def create_session_request(
-    server: str,
-    database: str,
-    username: str = None,
-    password: str = None,
-    driver: str = "ODBC Driver 17 for SQL Server",
-    use_trusted_connection: bool = False,
-    enabled_tables: list = None,
-    disabled_tables: list = None
-):
-    """Endpoint to create a session request for connecting to SQL database."""
+
+
+class SessionCredentials(BaseModel):
+    server: str
+    database: str
+    username: str = None
+    password: str = None
+    driver: str = "ODBC Driver 17 for SQL Server"
+    use_trusted_connection: bool = False
+
+class TableSelection(BaseModel):
+    table_name: str
+    enabled: bool = False
+
+class SessionRequest(BaseModel):
+    credentials: SessionCredentials
+    table_selections: Dict[str, bool] = {}
+
+class ColumnValidationRequest(BaseModel):
+    question: str
+    selected_tables: List[str]
+
+@app.post("/create-session")
+async def create_session(request: SessionRequest):
+    """First endpoint: Handle credentials and table selection for session creation."""
     try:
+        # Get all available tables with their descriptions
+        available_tables = {}
+        for table_name, table_info in TABLE_DESCRIPTIONS.items():
+            available_tables[table_name] = {
+                "description": table_info["description"],
+                "enabled": request.table_selections.get(table_name, False)
+            }
+        
+        # Create session data with selected tables
+        enabled_tables = [table_name for table_name, enabled in request.table_selections.items() if enabled]
+        if not enabled_tables:
+            enabled_tables = None  # Enable all tables by default
+            
         session_data = create_session_request_data(
-            server=server,
-            database=database,
-            username=username,
-            password=password,
-            driver=driver,
-            use_trusted_connection=use_trusted_connection,
-            enabled_tables=enabled_tables,
-            disabled_tables=disabled_tables
+            server=request.credentials.server,
+            database=request.credentials.database,
+            username=request.credentials.username,
+            password=request.credentials.password,
+            driver=request.credentials.driver,
+            use_trusted_connection=request.credentials.use_trusted_connection,
+            enabled_tables=enabled_tables
         )
+        
         return {
-            "session_request": session_data,
-            "status": "Session request created successfully"
+            "status": "Session created successfully",
+            "available_tables": available_tables,
+            "session_data": session_data,
+            "selected_tables": enabled_tables or list(TABLE_DESCRIPTIONS.keys())
         }
+        
     except Exception as e:
-        logger.error(f"Session request creation error: {e}")
-        raise HTTPException(status_code=500, detail=f"Session request creation failed: {str(e)}")
+        logger.error(f"Session creation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Session creation failed: {str(e)}")
+
+@app.post("/validate-column-selection")
+async def validate_column_selection(request: ColumnValidationRequest):
+    """Second endpoint: Column selection validation and RAG comparison."""
+    try:
+        # Get columns for selected tables
+        selected_table_details = {}
+        for table_name in request.selected_tables:
+            if table_name in TABLE_DESCRIPTIONS:
+                columns = TABLE_DESCRIPTIONS[table_name]["columns"]
+                selected_table_details[table_name] = {
+                    "columns": list(columns.keys()),
+                    "column_details": {col: {"description": desc, "enabled": False} 
+                                    for col, desc in columns.items()}
+                }
+        
+        # Use RAG retriever to get top 3 relevant tables for the question
+        relevant_tables = app.state.retriever.retrieve_relevant_tables(request.question, top_k=3)
+        rag_recommended_tables = [table["table"] for table in relevant_tables]
+        
+        # Check if selected tables are in RAG recommendations
+        selected_in_rag = []
+        selected_not_in_rag = []
+        
+        for selected_table in request.selected_tables:
+            if selected_table in rag_recommended_tables:
+                selected_in_rag.append(selected_table)
+            else:
+                selected_not_in_rag.append(selected_table)
+        
+        # Determine validation status
+        if len(selected_not_in_rag) == 0:
+            validation_status = "successful"
+            message = "All selected tables are within RAG recommendations"
+        else:
+            validation_status = "outofbound"
+            message = f"Some selected tables are not in RAG recommendations: {selected_not_in_rag}"
+        
+        return {
+            "validation_status": validation_status,
+            "message": message,
+            "selected_tables": request.selected_tables,
+            "rag_recommended_tables": rag_recommended_tables,
+            "selected_in_rag": selected_in_rag,
+            "selected_not_in_rag": selected_not_in_rag,
+            "table_column_details": selected_table_details,
+            "question_analyzed": request.question
+        }
+        
+    except Exception as e:
+        logger.error(f"Column validation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Column validation failed: {str(e)}")
+
+
+# @app.post("/create-session-request")
+# async def create_session_request(
+#     server: str,
+#     database: str,
+#     username: str = None,
+#     password: str = None,
+#     driver: str = "ODBC Driver 17 for SQL Server",
+#     use_trusted_connection: bool = False,
+#     enabled_tables: list = None,
+#     disabled_tables: list = None
+# ):
+#     """Endpoint to create a session request for connecting to SQL database."""
+#     try:
+#         session_data = create_session_request_data(
+#             server=server,
+#             database=database,
+#             username=username,
+#             password=password,
+#             driver=driver,
+#             use_trusted_connection=use_trusted_connection,
+#             enabled_tables=enabled_tables,
+#             disabled_tables=disabled_tables
+#         )
+#         return {
+#             "session_request": session_data,
+#             "status": "Session request created successfully"
+#         }
+#     except Exception as e:
+#         logger.error(f"Session request creation error: {e}")
+#         raise HTTPException(status_code=500, detail=f"Session request creation failed: {str(e)}")
 
 if __name__ == "__main__":
    import uvicorn
