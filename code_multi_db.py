@@ -32,127 +32,6 @@ logger = logging.getLogger(__name__)
 # Session storage (in production, use Redis or database)
 active_sessions = {}
 
-# Schema Information as Table Chunks
-TABLE_CHUNKS = [
-    {
-        "type": "table",
-        "table": "dwh.dim_claims",
-        "text": "Table: dwh.dim_claims | Columns: claim_reference_id, date_claim_first_notified, date_of_loss_from, date_claim_opened, date_of_loss_to, cause_of_loss_code, loss_description, date_coverage_confirmed, date_closed, date_claim_amount_agreed, date_paid_final_amount, date_fees_paid_final_amount, date_reopened, date_claim_denied, date_claim_withdrawn, status, refer_to_underwriters, denial_indicator, reason_for_denial, claim_total_claimed_amount, settlement_currency_code, indemnity_amount_paid, fees_amount_paid, expenses_paid_amount, dw_ins_upd_dt, org_id",
-        "description": "Contains claim metadata and lifecycle events including claim status, dates, amounts, and denial information.",
-        "columns": [
-            "claim_reference_id", "date_claim_first_notified", "date_of_loss_from", "date_claim_opened", 
-            "date_of_loss_to", "cause_of_loss_code", "loss_description", "date_coverage_confirmed", 
-            "date_closed", "date_claim_amount_agreed", "date_paid_final_amount", "date_fees_paid_final_amount", 
-            "date_reopened", "date_claim_denied", "date_claim_withdrawn", "status", "refer_to_underwriters", 
-            "denial_indicator", "reason_for_denial", "claim_total_claimed_amount", "settlement_currency_code", 
-            "indemnity_amount_paid", "fees_amount_paid", "expenses_paid_amount", "dw_ins_upd_dt", "org_id"
-        ],
-        "keywords": ["claims", "claim", "loss", "damage", "settlement", "denial", "status", "indemnity", "fees"]
-    },
-    {
-        "type": "table",
-        "table": "dwh.dim_policy",
-        "text": "Table: dwh.dim_policy | Columns: Id, agreement_id, policy_number, new_or_renewal, group_reference, broker_reference, changed_date, effective_date, start_date_time, expiry_date_time, renewal_date_time, product_code, product_name, country_code, country, a3_country_code, country_sub_division_code, class_of_business_code, classof_business_name, main_line_of_business_name, insurance_type, section_details_number, section_details_code, section_details_name, line_of_business, section_details_description, dw_ins_upd_dt, org_id, document_id",
-        "description": "Stores policy details, effective dates, product information, and geographical coverage.",
-        "columns": [
-            "Id", "agreement_id", "policy_number", "new_or_renewal", "group_reference", "broker_reference", 
-            "changed_date", "effective_date", "start_date_time", "expiry_date_time", "renewal_date_time", 
-            "product_code", "product_name", "country_code", "country", "a3_country_code", 
-            "country_sub_division_code", "class_of_business_code", "classof_business_name", 
-            "main_line_of_business_name", "insurance_type", "section_details_number", "section_details_code", 
-            "section_details_name", "line_of_business", "section_details_description", "dw_ins_upd_dt", 
-            "org_id", "document_id"
-        ],
-        "keywords": ["policy", "policies", "coverage", "product", "business", "renewal", "effective", "expiry"]
-    },
-    {
-        "type": "table",
-        "table": "dwh.fact_claims_dtl",
-        "text": "Table: dwh.fact_claims_dtl | Columns: Id, claim_reference_id, agreement_id, policy_number, org_id, riskitems_id, Payment_Detail_Settlement_Currency_Code, Paid_Amount, Expenses_Paid_Total_Amount, Coverage_Legal_Fees_Total_Paid_Amount, Defence_Legal_Fees_Total_Paid_Amount, Adjusters_Fees_Total_Paid_Amount, TPAFees_Paid_Amount, Fees_Paid_Amount, Incurred_Detail_Settlement_Currency_Code, Indemnity_Amount, Expenses_Amount, Coverage_Legal_Fees_Amount, Defence_Fees_Amount, Adjuster_Fees_Amount, TPAFees_Amount, Fees_Amount, indemnity_reserves_amount, dw_ins_upd_dt, indemnity_amount_paid",
-        "description": "Detailed claim financial information including payments, expenses, fees, and reserves.",
-        "columns": [
-            "Id", "claim_reference_id", "agreement_id", "policy_number", "org_id", "riskitems_id", 
-            "Payment_Detail_Settlement_Currency_Code", "Paid_Amount", "Expenses_Paid_Total_Amount", 
-            "Coverage_Legal_Fees_Total_Paid_Amount", "Defence_Legal_Fees_Total_Paid_Amount", 
-            "Adjusters_Fees_Total_Paid_Amount", "TPAFees_Paid_Amount", "Fees_Paid_Amount", 
-            "Incurred_Detail_Settlement_Currency_Code", "Indemnity_Amount", "Expenses_Amount", 
-            "Coverage_Legal_Fees_Amount", "Defence_Fees_Amount", "Adjuster_Fees_Amount", 
-            "TPAFees_Amount", "Fees_Amount", "indemnity_reserves_amount", "dw_ins_upd_dt", 
-            "indemnity_amount_paid"
-        ],
-        "keywords": ["claim details", "payments", "expenses", "fees", "legal", "adjusters", "reserves", "financial"]
-    },
-    {
-        "type": "table",
-        "table": "dwh.fact_premium",
-        "text": "Table: dwh.fact_premium | Columns: Id, agreement_id, policy_number, org_id, riskitems_id, original_currency_code, total_paid, instalments_amount, taxes_amount_paid, commission_percentage, commission_amount_paid, brokerage_amount_paid, insurance_amount_paid, additional_fees_paid, settlement_currency_code, gross_premium_settlement_currency, brokerage_amount_paid_settlement_currency, net_premium_settlement_currency, commission_amount_paid_settlement_currency, final_net_premium_settlement_currency, rate_of_exchange, total_settlement_amount_paid, date_paid, transaction_type, net_amount, gross_premium_paid_this_time, final_net_premium, tax_amount, dw_ins_upd_dt",
-        "description": "Premium payment transactions including commissions, taxes, brokerage, and currency information.",
-        "columns": [
-            "Id", "agreement_id", "policy_number", "org_id", "riskitems_id", "original_currency_code", 
-            "total_paid", "instalments_amount", "taxes_amount_paid", "commission_percentage", 
-            "commission_amount_paid", "brokerage_amount_paid", "insurance_amount_paid", 
-            "additional_fees_paid", "settlement_currency_code", "gross_premium_settlement_currency", 
-            "brokerage_amount_paid_settlement_currency", "net_premium_settlement_currency", 
-            "commission_amount_paid_settlement_currency", "final_net_premium_settlement_currency", 
-            "rate_of_exchange", "total_settlement_amount_paid", "date_paid", "transaction_type", 
-            "net_amount", "gross_premium_paid_this_time", "final_net_premium", "tax_amount", 
-            "dw_ins_upd_dt"
-        ],
-        "keywords": ["premium", "payments", "commission", "brokerage", "taxes", "instalments", "currency"]
-    },
-    {
-        "type": "table",
-        "table": "dwh.fct_policy",
-        "text": "Table: dwh.fct_policy | Columns: Id, agreement_id, policy_number, org_id, start_date, annual_premium, sum_insured, limit_of_liability, final_net_premium, tax_amount, final_net_premium_settlement_currency, settlement_currency_code, gross_premium_before_taxes_amount, dw_ins_upd_dt, document_id, gross_premium_paid_this_time",
-        "description": "Policy summary information including premiums, limits, and financial aggregates.",
-        "columns": [
-            "Id", "agreement_id", "policy_number", "org_id", "start_date", "annual_premium", 
-            "sum_insured", "limit_of_liability", "final_net_premium", "tax_amount", 
-            "final_net_premium_settlement_currency", "settlement_currency_code", 
-            "gross_premium_before_taxes_amount", "dw_ins_upd_dt", "document_id", 
-            "gross_premium_paid_this_time"
-        ],
-        "keywords": ["policy summary", "annual premium", "sum insured", "liability", "limits", "aggregates"]
-    }
-]
-
-JOIN_CONDITIONS = """
-Join Conditions:
-- fact_claims_dtl.claim_reference_id = dim_claims.claim_reference_id AND fact_claims_dtl.org_id = dim_claims.org_id
-- fct_policy.policy_number = dim_policy.policy_number AND fct_policy.org_id = dim_policy.org_id
-- fact_premium.policy_number = dim_policy.policy_number AND fact_premium.org_id = dim_policy.org_id
-
-Table Usage Guidelines:
-- Use `dwh.fact_premium` for premium/payment-related metrics and transactions
-- Use `dwh.dim_claims` or `dwh.fact_claims_dtl` for claim-related details and financials
-- Use `dwh.dim_policy` for policy metadata (start/end dates, renewals, products)
-- Use `dwh.fct_policy` for policy-level financial summaries
-
-Date Field Guidelines:
-- Use `date_paid` for premium payment dates in fact_premium
-- Use `date_claim_opened`, `date_closed`, etc. for claims in dim_claims
-- Use `effective_date`, `expiry_date_time` for policies in dim_policy
-"""
-
-TSQL_RULES = """
-T-SQL Rules and Requirements:
-- Use proper T-SQL syntax only (no PostgreSQL, MySQL, or other SQL dialects)
-- Use DATEPART(), YEAR(), MONTH(), DAY() for date functions instead of EXTRACT()
-- Use ISNULL() instead of COALESCE() when possible
-- Use TOP instead of LIMIT
-- For pagination, use OFFSET...FETCH NEXT instead of LIMIT
-- Use proper JOIN syntax with explicit INNER/LEFT/RIGHT/FULL OUTER
-- Do NOT use the column alias in the GROUP BY or ORDER BY clauses.
-- Instead, repeat the full expression used in the SELECT clause inside GROUP BY and ORDER BY
-- For string operations, use LEN() instead of LENGTH(), CHARINDEX() instead of POSITION()
-- Use GETDATE() for current datetime, not NOW()
-- For conditional logic, prefer CASE WHEN over IIF() for compatibility
-- Do NOT use NULLS FIRST/NULLS LAST in ORDER BY (not supported in T-SQL)
-- Use proper table aliases and qualify column names where ambiguous
-- For date formatting, use FORMAT() or CONVERT() functions
-- Use appropriate data types: VARCHAR(MAX), NVARCHAR(MAX), DECIMAL, DATETIME2, etc.
-- its of date time format eg:2024-11-21 06:57:57.000
-"""
 
 # --- 2. FastAPI and Pydantic Setup ---
 app = FastAPI(title="RAG-Enhanced SQL Query Generator and Analyzer", version="3.0.0")
@@ -184,10 +63,17 @@ class SessionRequest(BaseModel):
     table_descriptions: Dict[str, str]
     column_descriptions: Dict[str, Dict[str, str]]
 
+class SessionRequest(BaseModel):
+    credentials: dict
+    tables: Dict[str, bool]
+    table_descriptions: Dict[str, str]
+    column_descriptions: Dict[str, Dict[str, str]]
+
 class SessionResponse(BaseModel):
-    success: bool
-    message: str
-    session_id: str = None
+    credentials: dict = {}
+    tables: Dict[str, bool]
+    table_descriptions: Dict[str, str]
+    column_descriptions: Dict[str, Dict[str, str]]
 
 # --- 3. RAG Schema Retrieval System with FAISS ---
 class SchemaRetriever:
@@ -772,110 +658,142 @@ def shutdown_event():
     executor.shutdown(wait=True)
     logger.info("🧹 Memory cleaned up and executor shut down.")
 
+# Complete /start-session endpoint
 @app.post("/start-session", response_model=SessionResponse)
 async def start_session(request: SessionRequest):
     """Start a new session with connection string and table selection."""
     try:
+        # Build connection string from user credentials
         connection_string = build_connection_string(request.credentials)
         
+        # Test database connection
         try:
             engine = create_engine(connection_string)
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
             logger.info("Database connection test successful")
         except Exception as e:
+            logger.error(f"Database connection failed: {e}")
             raise HTTPException(status_code=400, detail=f"Database connection failed: {str(e)}")
         
+        # Generate unique session ID
         import uuid
         session_id = str(uuid.uuid4())
         
+        # Create dynamic table chunks from user input instead of hardcoded ones
         table_chunks = create_dynamic_table_chunks(
             request.tables, 
             request.table_descriptions, 
             request.column_descriptions
         )
         
+        # Validate that at least one table is selected
         if not table_chunks:
-            raise HTTPException(status_code=400, detail="No tables selected")
+            raise HTTPException(status_code=400, detail="No tables selected. Please enable at least one table.")
         
+        # Store session data in memory (in production, use Redis or database)
         active_sessions[session_id] = {
             "connection_string": connection_string,
             "table_chunks": table_chunks,
-            "created_at": time.time()
+            "created_at": time.time(),
+            "session_id": session_id,
+            "credentials": request.credentials,  # Store for potential reconnection
+            "tables": request.tables,
+            "table_descriptions": request.table_descriptions,
+            "column_descriptions": request.column_descriptions
         }
         
+        logger.info(f"Session {session_id} created successfully with {len(table_chunks)} tables")
+        
+        # Return the schema structure as requested (without actual credentials for security)
         return SessionResponse(
-            success=True,
-            message=f"Session started successfully with {len(table_chunks)} tables",
+            credentials={},  # Empty for security - don't expose actual credentials
+            tables=request.tables,
+            table_descriptions=request.table_descriptions,
+            column_descriptions=request.column_descriptions,
             session_id=session_id
         )
         
+    except HTTPException:
+        # Re-raise HTTP exceptions (like connection failures)
+        raise
     except Exception as e:
-        logger.error(f"Session start error: {e}")
+        logger.error(f"Unexpected error in session start: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to start session: {str(e)}")
 
-@app.post("/generate-and-analyze-sql", response_model=QueryResponse)
-async def process_query(request: QueryRequest):
-    """Main endpoint to generate SQL, execute it, and analyze results with session support."""
-    if not request.session_id or request.session_id not in active_sessions:
-        raise HTTPException(status_code=400, detail="Invalid or missing session_id. Please start a session first.")
+# Helper function to validate session (optional but recommended)
+def validate_session(session_id: str) -> dict:
+    """Validate session exists and return session data."""
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID is required")
     
-    session_data = active_sessions[request.session_id]
-    connection_string = session_data["connection_string"]
-    table_chunks = session_data["table_chunks"]
+    if session_id not in active_sessions:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
     
-    total_start_time = time.time()
-    loop = app.state.loop
+    session_data = active_sessions[session_id]
     
-    try:
-        temp_retriever = SchemaRetriever(table_chunks, EMBEDDING_MODEL_NAME)
+    # Optional: Check if session is too old (e.g., older than 24 hours)
+    current_time = time.time()
+    session_age = current_time - session_data["created_at"]
+    max_session_age = 24 * 60 * 60  # 24 hours in seconds
+    
+    if session_age > max_session_age:
+        del active_sessions[session_id]
+        raise HTTPException(status_code=410, detail="Session expired")
+    
+    return session_data
+
+# Updated function to create dynamic table chunks
+def create_dynamic_table_chunks(tables: Dict[str, bool], table_descriptions: Dict[str, str], 
+                               column_descriptions: Dict[str, Dict[str, str]]) -> List[Dict]:
+    """Creates table chunks based on user selection and schema."""
+    dynamic_chunks = []
+    
+    for table_name, is_enabled in tables.items():
+        if not is_enabled:
+            continue
+            
+        # Get table description
+        description = table_descriptions.get(table_name, "No description available")
         
-        sql_query, retrieved_tables, retrieval_time, sql_generation_time, retry_attempts = await loop.run_in_executor(
-            executor, generate_sql_with_rag_with_retry_session, request.question, temp_retriever, connection_string, 2
-        )
+        # Get column information
+        table_columns = column_descriptions.get(table_name, {})
+        columns = list(table_columns.keys())
         
-        if not sql_query:
-            raise HTTPException(status_code=400, detail="Failed to generate SQL query after all attempts.")
+        # Generate keywords for better retrieval
+        keywords = []
         
-        sql_execution_result, sql_execution_time = await loop.run_in_executor(
-            executor, execute_sql_direct, sql_query, connection_string
-        )
+        # Add table name parts as keywords
+        table_parts = table_name.lower().replace('dwh.', '').replace('dim_', '').replace('fact_', '').replace('fct_', '').split('_')
+        keywords.extend([part for part in table_parts if len(part) > 2])
         
-        llm_analysis, llm_analysis_time = await loop.run_in_executor(
-            executor, analyze_results, request.question, sql_query, sql_execution_result
-        )
+        # Add description words as keywords
+        desc_words = description.lower().split()
+        keywords.extend([word for word in desc_words if len(word) > 3 and word.isalpha()])
         
-        total_processing_time = time.time() - total_start_time
+        # Add column names as keywords
+        for col in columns:
+            col_parts = col.lower().split('_')
+            keywords.extend([part for part in col_parts if len(part) > 2])
         
-        is_successful = (
-            sql_execution_result.get("success", False) or
-            (sql_execution_result.get("data") is not None and "error" not in sql_execution_result)
-        )
+        # Remove duplicates and common stop words
+        stop_words = {'the', 'and', 'for', 'with', 'from', 'this', 'that', 'table', 'column'}
+        keywords = list(set([k for k in keywords if k not in stop_words and len(k) > 2]))
         
-        response_data = {
-            "success": is_successful,
-            "question": request.question,
-            "retrieved_tables": retrieved_tables,
-            "generated_sql": sql_query,
-            "sql_execution_result": sql_execution_result,
-            "llm_analysis": llm_analysis,
-            "retrieval_time": round(retrieval_time, 2),
-            "sql_generation_time": round(sql_generation_time, 2),
-            "llm_analysis_time": round(llm_analysis_time, 2),
-            "sql_execution_time": round(sql_execution_time, 2),
-            "total_processing_time": round(total_processing_time, 2),
-            "retry_attempts": retry_attempts,
-            "total_attempts": len(retry_attempts) + 1 if not retry_attempts or not is_successful else 1
+        # Create table chunk
+        chunk = {
+            "type": "table",
+            "table": table_name,
+            "text": f"Table: {table_name} | Columns: {', '.join(columns)}",
+            "description": description,
+            "columns": columns,
+            "keywords": keywords,
+            "column_descriptions": table_columns  # Include detailed column descriptions
         }
         
-        file_saved = await loop.run_in_executor(None, save_result_to_file, response_data)
-        response_data["file_saved"] = file_saved
-        
-        return QueryResponse(**response_data)
-        
-    except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+        dynamic_chunks.append(chunk)
+    
+    return dynamic_chunks
 
 @app.post("/generate-sql-only")
 async def generate_sql_only(request: QueryRequest):
