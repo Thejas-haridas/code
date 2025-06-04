@@ -972,6 +972,13 @@ async def test_retrieval(request: QueryRequest):
 
 
 
+from typing import Dict, List, Optional
+from pydantic import BaseModel
+from fastapi import HTTPException
+import logging
+
+logger = logging.getLogger(__name__)
+
 class SessionCredentials(BaseModel):
     server: str
     database: str
@@ -982,33 +989,106 @@ class SessionCredentials(BaseModel):
 
 class TableSelection(BaseModel):
     table_name: str
+    description: str
     enabled: bool = False
 
 class SessionRequest(BaseModel):
     credentials: SessionCredentials
-    table_selections: Dict[str, bool] = {}
+    available_tables: List[TableSelection]  # Now comes as input
+
+class ColumnSelection(BaseModel):
+    column_name: str
+    description: str
+    enabled: bool = False
+
+class TableColumnInput(BaseModel):
+    table_name: str
+    columns: List[ColumnSelection]
 
 class ColumnValidationRequest(BaseModel):
     question: str
-    selected_tables: List[str]
+    selected_tables_with_columns: List[TableColumnInput]  # Now comes as input with columns
+
+# Helper function to get available tables (for frontend to populate the request)
+def get_available_tables_data():
+    """Helper function to get all available tables - use this in your frontend to populate SessionRequest."""
+    try:
+        available_tables = []
+        for table_name, table_info in TABLE_DESCRIPTIONS.items():
+            available_tables.append({
+                "table_name": table_name,
+                "description": table_info["description"],
+                "enabled": False,
+                "total_columns": len(table_info["columns"])
+            })
+        
+        return {
+            "available_tables": available_tables,
+            "total_tables": len(available_tables)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting available tables: {e}")
+        return {"error": f"Failed to get available tables: {str(e)}"}
+
+# Helper function to get table columns (for frontend to populate the column validation request)
+def get_table_columns_data(table_name: str):
+    """Helper function to get columns for a specific table - use this in your frontend."""
+    try:
+        if table_name not in TABLE_DESCRIPTIONS:
+            return {"error": f"Table {table_name} not found"}
+        
+        table_info = TABLE_DESCRIPTIONS[table_name]
+        columns = []
+        
+        for col_name, col_description in table_info["columns"].items():
+            columns.append({
+                "column_name": col_name,
+                "description": col_description,
+                "enabled": False
+            })
+        
+        return {
+            "table_name": table_name,
+            "table_description": table_info["description"],
+            "columns": columns,
+            "total_columns": len(columns)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting table columns: {e}")
+        return {"error": f"Failed to get table columns: {str(e)}"}
 
 @app.post("/create-session")
 async def create_session(request: SessionRequest):
-    """First endpoint: Handle credentials and table selection for session creation."""
+    """First endpoint: Handle credentials and table selection for session creation.
+    
+    The available_tables should be populated using get_available_tables_data() helper function.
+    """
     try:
-        # Get all available tables with their descriptions
-        available_tables = {}
-        for table_name, table_info in TABLE_DESCRIPTIONS.items():
-            available_tables[table_name] = {
-                "description": table_info["description"],
-                "enabled": request.table_selections.get(table_name, False)
-            }
+        # Extract selected tables from the input
+        selected_tables = [table.table_name for table in request.available_tables if table.enabled]
         
-        # Create session data with selected tables
-        enabled_tables = [table_name for table_name, enabled in request.table_selections.items() if enabled]
-        if not enabled_tables:
-            enabled_tables = None  # Enable all tables by default
-            
+        if not selected_tables:
+            raise HTTPException(status_code=400, detail="At least one table must be selected")
+        
+        # Validate that selected tables exist in our TABLE_DESCRIPTIONS
+        invalid_tables = [table for table in selected_tables if table not in TABLE_DESCRIPTIONS]
+        if invalid_tables:
+            raise HTTPException(status_code=400, detail=f"Invalid tables selected: {invalid_tables}")
+        
+        # Get details of selected tables
+        selected_table_details = {}
+        for table in request.available_tables:
+            if table.enabled and table.table_name in TABLE_DESCRIPTIONS:
+                table_info = TABLE_DESCRIPTIONS[table.table_name]
+                selected_table_details[table.table_name] = {
+                    "description": table_info["description"],
+                    "total_columns": len(table_info["columns"]),
+                    "enabled": True
+                }
+        
+        # Create session data with selected tables only
         session_data = create_session_request_data(
             server=request.credentials.server,
             database=request.credentials.database,
@@ -1016,14 +1096,26 @@ async def create_session(request: SessionRequest):
             password=request.credentials.password,
             driver=request.credentials.driver,
             use_trusted_connection=request.credentials.use_trusted_connection,
-            enabled_tables=enabled_tables
+            enabled_tables=selected_tables
         )
+        
+        # Prepare column data for next step
+        next_step_columns = []
+        for table_name in selected_tables:
+            columns_data = get_table_columns_data(table_name)
+            if "error" not in columns_data:
+                next_step_columns.append({
+                    "table_name": table_name,
+                    "columns": columns_data["columns"]
+                })
         
         return {
             "status": "Session created successfully",
-            "available_tables": available_tables,
+            "selected_tables": selected_table_details,
             "session_data": session_data,
-            "selected_tables": enabled_tables or list(TABLE_DESCRIPTIONS.keys())
+            "credentials_validated": True,
+            "next_step": "Use /validate-column-selection endpoint with your question and selected tables with columns",
+            "column_data_for_next_step": next_step_columns  # Provide this for frontend to populate next request
         }
         
     except Exception as e:
@@ -1032,55 +1124,136 @@ async def create_session(request: SessionRequest):
 
 @app.post("/validate-column-selection")
 async def validate_column_selection(request: ColumnValidationRequest):
-    """Second endpoint: Column selection validation and RAG comparison."""
+    """Second endpoint: Column selection validation and RAG comparison.
+    
+    The selected_tables_with_columns should be populated using the column_data_for_next_step 
+    from the create-session response or by calling get_table_columns_data() for each selected table.
+    """
     try:
-        # Get columns for selected tables
-        selected_table_details = {}
-        for table_name in request.selected_tables:
-            if table_name in TABLE_DESCRIPTIONS:
-                columns = TABLE_DESCRIPTIONS[table_name]["columns"]
-                selected_table_details[table_name] = {
-                    "columns": list(columns.keys()),
-                    "column_details": {col: {"description": desc, "enabled": False} 
-                                    for col, desc in columns.items()}
+        # Extract selected tables and their columns
+        selected_tables = [table.table_name for table in request.selected_tables_with_columns]
+        
+        # Validate that selected tables exist
+        invalid_tables = [table for table in selected_tables if table not in TABLE_DESCRIPTIONS]
+        if invalid_tables:
+            raise HTTPException(status_code=400, detail=f"Invalid tables selected: {invalid_tables}")
+        
+        # Process column selections
+        table_column_details = {}
+        column_selections = {}  # Convert to the format expected by existing logic
+        
+        for table_input in request.selected_tables_with_columns:
+            table_name = table_input.table_name
+            table_info = TABLE_DESCRIPTIONS[table_name]
+            
+            # Validate columns exist in the table
+            valid_columns = set(table_info["columns"].keys())
+            input_columns = {col.column_name for col in table_input.columns}
+            invalid_columns = input_columns - valid_columns
+            
+            if invalid_columns:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Invalid columns for table {table_name}: {invalid_columns}"
+                )
+            
+            columns_info = {}
+            column_selections[table_name] = {}
+            
+            for col_input in table_input.columns:
+                col_name = col_input.column_name
+                col_description = table_info["columns"].get(col_name, col_input.description)
+                
+                columns_info[col_name] = {
+                    "description": col_description,
+                    "enabled": col_input.enabled,
+                    "data_type": "varchar/int/datetime",  # You can enhance this with actual data types
                 }
+                column_selections[table_name][col_name] = col_input.enabled
+            
+            table_column_details[table_name] = {
+                "table_description": table_info["description"],
+                "columns": columns_info,
+                "total_columns": len(columns_info),
+                "selected_columns": sum(1 for col in columns_info.values() if col["enabled"])
+            }
         
         # Use RAG retriever to get top 3 relevant tables for the question
         relevant_tables = app.state.retriever.retrieve_relevant_tables(request.question, top_k=3)
         rag_recommended_tables = [table["table"] for table in relevant_tables]
         
-        # Check if selected tables are in RAG recommendations
+        # Create detailed RAG recommendations
+        rag_table_details = {}
+        for table in relevant_tables:
+            table_name = table["table"]
+            rag_table_details[table_name] = {
+                "description": table["description"],
+                "keywords": table["keywords"],
+                "relevance_rank": relevant_tables.index(table) + 1
+            }
+        
+        # Compare selected tables with RAG recommendations
         selected_in_rag = []
         selected_not_in_rag = []
+        missing_from_selection = []
         
-        for selected_table in request.selected_tables:
+        for selected_table in selected_tables:
             if selected_table in rag_recommended_tables:
                 selected_in_rag.append(selected_table)
             else:
                 selected_not_in_rag.append(selected_table)
         
-        # Determine validation status
-        if len(selected_not_in_rag) == 0:
-            validation_status = "successful"
-            message = "All selected tables are within RAG recommendations"
+        # Check if there are recommended tables that weren't selected
+        for rag_table in rag_recommended_tables:
+            if rag_table not in selected_tables:
+                missing_from_selection.append(rag_table)
+        
+        # Determine validation status and recommendations
+        if len(selected_not_in_rag) == 0 and len(missing_from_selection) == 0:
+            validation_status = "perfect_match"
+            message = "Perfect match! All selected tables are within RAG recommendations and no recommended tables are missing."
+        elif len(selected_not_in_rag) == 0:
+            validation_status = "good_match"
+            message = f"Good selection! All selected tables are relevant. Consider also including: {missing_from_selection}"
+        elif len(selected_in_rag) > 0:
+            validation_status = "partial_match"
+            message = f"Partial match. Relevant tables: {selected_in_rag}. Consider removing: {selected_not_in_rag}. Consider adding: {missing_from_selection}"
         else:
-            validation_status = "outofbound"
-            message = f"Some selected tables are not in RAG recommendations: {selected_not_in_rag}"
+            validation_status = "poor_match"
+            message = f"Poor match. None of the selected tables are in top RAG recommendations. Consider using: {rag_recommended_tables}"
         
         return {
             "validation_status": validation_status,
             "message": message,
-            "selected_tables": request.selected_tables,
-            "rag_recommended_tables": rag_recommended_tables,
-            "selected_in_rag": selected_in_rag,
-            "selected_not_in_rag": selected_not_in_rag,
-            "table_column_details": selected_table_details,
-            "question_analyzed": request.question
+            "question_analyzed": request.question,
+            "analysis_summary": {
+                "selected_tables_count": len(selected_tables),
+                "rag_recommended_count": len(rag_recommended_tables),
+                "matching_tables": len(selected_in_rag),
+                "non_matching_tables": len(selected_not_in_rag),
+                "missing_recommended": len(missing_from_selection)
+            },
+            "selected_tables": selected_tables,
+            "rag_recommendations": {
+                "recommended_tables": rag_recommended_tables,
+                "detailed_recommendations": rag_table_details
+            },
+            "comparison_results": {
+                "selected_in_rag": selected_in_rag,
+                "selected_not_in_rag": selected_not_in_rag,
+                "missing_from_selection": missing_from_selection
+            },
+            "table_column_details": table_column_details,
+            "next_steps": {
+                "if_satisfied": "Proceed with SQL generation using /generate-and-analyze-sql",
+                "if_not_satisfied": "Modify table/column selections and revalidate"
+            }
         }
         
     except Exception as e:
         logger.error(f"Column validation error: {e}")
         raise HTTPException(status_code=500, detail=f"Column validation failed: {str(e)}")
+
 
 
 # @app.post("/create-session-request")
