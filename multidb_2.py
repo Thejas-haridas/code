@@ -973,7 +973,7 @@ async def test_retrieval(request: QueryRequest):
 
 
 from typing import Dict, List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import HTTPException
 import logging
 
@@ -987,83 +987,220 @@ class SessionCredentials(BaseModel):
     driver: str = "ODBC Driver 17 for SQL Server"
     use_trusted_connection: bool = False
 
+# Define table selection model with actual table names
+class AvailableTablesSelection(BaseModel):
+    dwh_dim_claims: bool = Field(default=False, alias="dwh.dim_claims", description="Claims metadata and lifecycle events")
+    dwh_dim_policy: bool = Field(default=False, alias="dwh.dim_policy", description="Policy details and coverage information")
+    dwh_fact_claims_dtl: bool = Field(default=False, alias="dwh.fact_claims_dtl", description="Detailed claim financial information")
+    dwh_fact_premium: bool = Field(default=False, alias="dwh.fact_premium", description="Premium payment transactions")
+    dwh_fct_policy: bool = Field(default=False, alias="dwh.fct_policy", description="Policy summary and financial aggregates")
+
+    class Config:
+        allow_population_by_field_name = True
+        populate_by_name = True
+
 class SessionRequest(BaseModel):
     credentials: SessionCredentials
-    available_tables: Dict[str, bool]  # Format: {table_name: enabled}
+    available_tables: AvailableTablesSelection
+
+# Define column selection models for each table
+class DimClaimsColumns(BaseModel):
+    claim_reference_id: bool = Field(default=False, description="Unique identifier for each claim")
+    date_claim_first_notified: bool = Field(default=False, description="Date when the claim was first reported")
+    date_of_loss_from: bool = Field(default=False, description="Start date of the loss event")
+    date_claim_opened: bool = Field(default=False, description="Date when claim was opened")
+    date_of_loss_to: bool = Field(default=False, description="End date of the loss event")
+    cause_of_loss_code: bool = Field(default=False, description="Code identifying the cause of loss")
+    loss_description: bool = Field(default=False, description="Detailed description of the loss event")
+    date_coverage_confirmed: bool = Field(default=False, description="Date when coverage was confirmed")
+    date_closed: bool = Field(default=False, description="Date when the claim was closed")
+    date_claim_amount_agreed: bool = Field(default=False, description="Date when claim amount was agreed")
+    date_paid_final_amount: bool = Field(default=False, description="Date when final payment was made")
+    date_fees_paid_final_amount: bool = Field(default=False, description="Date when final fees were paid")
+    date_reopened: bool = Field(default=False, description="Date when claim was reopened if applicable")
+    date_claim_denied: bool = Field(default=False, description="Date when claim was denied")
+    date_claim_withdrawn: bool = Field(default=False, description="Date when claim was withdrawn")
+    status: bool = Field(default=False, description="Current status of the claim")
+    refer_to_underwriters: bool = Field(default=False, description="Flag indicating referral to underwriters")
+    denial_indicator: bool = Field(default=False, description="Flag indicating if claim was denied")
+    reason_for_denial: bool = Field(default=False, description="Reason provided for claim denial")
+    claim_total_claimed_amount: bool = Field(default=False, description="Total amount claimed")
+    settlement_currency_code: bool = Field(default=False, description="Currency code for settlement")
+    indemnity_amount_paid: bool = Field(default=False, description="Amount paid as indemnity")
+    fees_amount_paid: bool = Field(default=False, description="Total fees paid")
+    expenses_paid_amount: bool = Field(default=False, description="Expenses paid amount")
+    dw_ins_upd_dt: bool = Field(default=False, description="Data warehouse last update timestamp")
+    org_id: bool = Field(default=False, description="Organization identifier")
+
+class DimPolicyColumns(BaseModel):
+    Id: bool = Field(default=False, description="Unique policy record identifier")
+    agreement_id: bool = Field(default=False, description="Agreement identifier linking policy to contract")
+    policy_number: bool = Field(default=False, description="Policy number as issued")
+    new_or_renewal: bool = Field(default=False, description="Indicates if policy is new or renewal")
+    group_reference: bool = Field(default=False, description="Group reference number")
+    broker_reference: bool = Field(default=False, description="Broker reference identifier")
+    changed_date: bool = Field(default=False, description="Date when policy was last changed")
+    effective_date: bool = Field(default=False, description="Date when policy becomes effective")
+    start_date_time: bool = Field(default=False, description="Policy start date and time")
+    expiry_date_time: bool = Field(default=False, description="Policy expiry date and time")
+    renewal_date_time: bool = Field(default=False, description="Policy renewal date and time")
+    product_code: bool = Field(default=False, description="Code identifying the insurance product")
+    product_name: bool = Field(default=False, description="Name of the insurance product")
+    country_code: bool = Field(default=False, description="ISO country code")
+    country: bool = Field(default=False, description="Country name where policy is issued")
+    a3_country_code: bool = Field(default=False, description="ISO 3-letter country code")
+    country_sub_division_code: bool = Field(default=False, description="Country subdivision code")
+    class_of_business_code: bool = Field(default=False, description="Business classification code")
+    classof_business_name: bool = Field(default=False, description="Business classification name")
+    main_line_of_business_name: bool = Field(default=False, description="Main line of business")
+    insurance_type: bool = Field(default=False, description="Type of insurance coverage")
+    section_details_number: bool = Field(default=False, description="Section detail number")
+    section_details_code: bool = Field(default=False, description="Section detail code")
+    section_details_name: bool = Field(default=False, description="Section detail name")
+    line_of_business: bool = Field(default=False, description="Line of business")
+    section_details_description: bool = Field(default=False, description="Section detail description")
+    dw_ins_upd_dt: bool = Field(default=False, description="Data warehouse last update timestamp")
+    org_id: bool = Field(default=False, description="Organization identifier")
+    document_id: bool = Field(default=False, description="Document identifier")
+
+class FactClaimsDtlColumns(BaseModel):
+    Id: bool = Field(default=False, description="Unique record identifier")
+    claim_reference_id: bool = Field(default=False, description="Reference to claim in dim_claims")
+    agreement_id: bool = Field(default=False, description="Agreement identifier")
+    policy_number: bool = Field(default=False, description="Associated policy number")
+    org_id: bool = Field(default=False, description="Organization identifier")
+    riskitems_id: bool = Field(default=False, description="Risk items identifier")
+    Payment_Detail_Settlement_Currency_Code: bool = Field(default=False, description="Settlement currency for payments")
+    Paid_Amount: bool = Field(default=False, description="Total amount paid for this claim detail")
+    Expenses_Paid_Total_Amount: bool = Field(default=False, description="Total expenses paid")
+    Coverage_Legal_Fees_Total_Paid_Amount: bool = Field(default=False, description="Legal fees paid under coverage")
+    Defence_Legal_Fees_Total_Paid_Amount: bool = Field(default=False, description="Defense legal fees paid")
+    Adjusters_Fees_Total_Paid_Amount: bool = Field(default=False, description="Adjuster fees paid")
+    TPAFees_Paid_Amount: bool = Field(default=False, description="Third Party Administrator fees paid")
+    Fees_Paid_Amount: bool = Field(default=False, description="Total fees paid")
+    Incurred_Detail_Settlement_Currency_Code: bool = Field(default=False, description="Settlement currency for incurred amounts")
+    Indemnity_Amount: bool = Field(default=False, description="Indemnity amount for this detail")
+    Expenses_Amount: bool = Field(default=False, description="Expenses amount")
+    Coverage_Legal_Fees_Amount: bool = Field(default=False, description="Coverage legal fees amount")
+    Defence_Fees_Amount: bool = Field(default=False, description="Defense fees amount")
+    Adjuster_Fees_Amount: bool = Field(default=False, description="Adjuster fees amount")
+    TPAFees_Amount: bool = Field(default=False, description="TPA fees amount")
+    Fees_Amount: bool = Field(default=False, description="Total fees amount")
+    indemnity_reserves_amount: bool = Field(default=False, description="Reserved amount for indemnity")
+    dw_ins_upd_dt: bool = Field(default=False, description="Data warehouse last update timestamp")
+    indemnity_amount_paid: bool = Field(default=False, description="Actual indemnity amount paid")
+
+class FactPremiumColumns(BaseModel):
+    Id: bool = Field(default=False, description="Unique transaction identifier")
+    agreement_id: bool = Field(default=False, description="Agreement identifier")
+    policy_number: bool = Field(default=False, description="Associated policy number")
+    org_id: bool = Field(default=False, description="Organization identifier")
+    riskitems_id: bool = Field(default=False, description="Risk items identifier")
+    original_currency_code: bool = Field(default=False, description="Original currency code")
+    total_paid: bool = Field(default=False, description="Total amount paid in original currency")
+    instalments_amount: bool = Field(default=False, description="Installment amount")
+    taxes_amount_paid: bool = Field(default=False, description="Tax amount paid")
+    commission_percentage: bool = Field(default=False, description="Commission percentage applied")
+    commission_amount_paid: bool = Field(default=False, description="Commission amount paid")
+    brokerage_amount_paid: bool = Field(default=False, description="Brokerage fees paid")
+    insurance_amount_paid: bool = Field(default=False, description="Insurance amount paid")
+    additional_fees_paid: bool = Field(default=False, description="Additional fees paid")
+    settlement_currency_code: bool = Field(default=False, description="Settlement currency code")
+    gross_premium_settlement_currency: bool = Field(default=False, description="Gross premium in settlement currency")
+    brokerage_amount_paid_settlement_currency: bool = Field(default=False, description="Brokerage amount in settlement currency")
+    net_premium_settlement_currency: bool = Field(default=False, description="Net premium in settlement currency")
+    commission_amount_paid_settlement_currency: bool = Field(default=False, description="Commission amount in settlement currency")
+    final_net_premium_settlement_currency: bool = Field(default=False, description="Final net premium in settlement currency")
+    rate_of_exchange: bool = Field(default=False, description="Exchange rate applied")
+    total_settlement_amount_paid: bool = Field(default=False, description="Total settlement amount paid")
+    date_paid: bool = Field(default=False, description="Date when payment was made")
+    transaction_type: bool = Field(default=False, description="Type of premium transaction")
+    net_amount: bool = Field(default=False, description="Net amount")
+    gross_premium_paid_this_time: bool = Field(default=False, description="Gross premium paid in this transaction")
+    final_net_premium: bool = Field(default=False, description="Final net premium")
+    tax_amount: bool = Field(default=False, description="Tax amount")
+    dw_ins_upd_dt: bool = Field(default=False, description="Data warehouse last update timestamp")
+
+class FctPolicyColumns(BaseModel):
+    Id: bool = Field(default=False, description="Unique policy fact identifier")
+    agreement_id: bool = Field(default=False, description="Agreement identifier")
+    policy_number: bool = Field(default=False, description="Policy number")
+    org_id: bool = Field(default=False, description="Organization identifier")
+    start_date: bool = Field(default=False, description="Policy start date")
+    annual_premium: bool = Field(default=False, description="Annual premium amount")
+    sum_insured: bool = Field(default=False, description="Total sum insured")
+    limit_of_liability: bool = Field(default=False, description="Liability coverage limit")
+    final_net_premium: bool = Field(default=False, description="Final net premium after all adjustments")
+    tax_amount: bool = Field(default=False, description="Tax amount on premium")
+    final_net_premium_settlement_currency: bool = Field(default=False, description="Final net premium in settlement currency")
+    settlement_currency_code: bool = Field(default=False, description="Currency code for settlement")
+    gross_premium_before_taxes_amount: bool = Field(default=False, description="Gross premium before tax calculation")
+    dw_ins_upd_dt: bool = Field(default=False, description="Data warehouse last update timestamp")
+    document_id: bool = Field(default=False, description="Document identifier")
+    gross_premium_paid_this_time: bool = Field(default=False, description="Gross premium paid in current transaction")
+
+# Main column selection model for all tables
+class SelectedTablesWithColumns(BaseModel):
+    dwh_dim_claims: Optional[DimClaimsColumns] = Field(default=None, alias="dwh.dim_claims")
+    dwh_dim_policy: Optional[DimPolicyColumns] = Field(default=None, alias="dwh.dim_policy")
+    dwh_fact_claims_dtl: Optional[FactClaimsDtlColumns] = Field(default=None, alias="dwh.fact_claims_dtl")
+    dwh_fact_premium: Optional[FactPremiumColumns] = Field(default=None, alias="dwh.fact_premium")
+    dwh_fct_policy: Optional[FctPolicyColumns] = Field(default=None, alias="dwh.fct_policy")
+
+    class Config:
+        allow_population_by_field_name = True
+        populate_by_name = True
 
 class ColumnValidationRequest(BaseModel):
     question: str
-    selected_tables_with_columns: Dict[str, Dict[str, bool]]  # Format: {table_name: {column_name: enabled}}
+    selected_tables_with_columns: SelectedTablesWithColumns
 
-# Helper function to get available tables (for frontend to populate the request)
-def get_available_tables_data():
-    """Helper function to get all available tables - returns dict format {table_name: false}."""
-    try:
-        available_tables = {}
-        table_details = {}
-        
-        for table_name, table_info in TABLE_DESCRIPTIONS.items():
-            available_tables[table_name] = False  # Default to not selected
-            table_details[table_name] = {
-                "description": table_info["description"],
-                "total_columns": len(table_info["columns"])
-            }
-        
-        return {
-            "available_tables": available_tables,  # {table_name: false}
-            "table_details": table_details,  # Additional info for frontend
-            "total_tables": len(available_tables)
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting available tables: {e}")
-        return {"error": f"Failed to get available tables: {str(e)}"}
+# Helper function to convert the structured models back to dict format for processing
+def convert_table_selection_to_dict(available_tables: AvailableTablesSelection) -> Dict[str, bool]:
+    """Convert AvailableTablesSelection model to dict format for backend processing."""
+    return {
+        "dwh.dim_claims": available_tables.dwh_dim_claims,
+        "dwh.dim_policy": available_tables.dwh_dim_policy,
+        "dwh.fact_claims_dtl": available_tables.dwh_fact_claims_dtl,
+        "dwh.fact_premium": available_tables.dwh_fact_premium,
+        "dwh.fct_policy": available_tables.dwh_fct_policy
+    }
 
-# Helper function to get table columns (for frontend to populate the column validation request)
-def get_table_columns_data(table_name: str):
-    """Helper function to get columns for a specific table - returns dict format {column_name: false}."""
-    try:
-        if table_name not in TABLE_DESCRIPTIONS:
-            return {"error": f"Table {table_name} not found"}
-        
-        table_info = TABLE_DESCRIPTIONS[table_name]
-        columns = {}
-        column_details = {}
-        
-        for col_name, col_description in table_info["columns"].items():
-            columns[col_name] = False  # Default to not selected
-            column_details[col_name] = col_description
-        
-        return {
-            "table_name": table_name,
-            "table_description": table_info["description"],
-            "columns": columns,  # {column_name: false}
-            "column_details": column_details,  # Additional info for frontend
-            "total_columns": len(columns)
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting table columns: {e}")
-        return {"error": f"Failed to get table columns: {str(e)}"}
+def convert_column_selection_to_dict(selected_tables: SelectedTablesWithColumns) -> Dict[str, Dict[str, bool]]:
+    """Convert SelectedTablesWithColumns model to dict format for backend processing."""
+    result = {}
+    
+    # Handle dwh.dim_claims
+    if selected_tables.dwh_dim_claims is not None:
+        result["dwh.dim_claims"] = selected_tables.dwh_dim_claims.dict()
+    
+    # Handle dwh.dim_policy
+    if selected_tables.dwh_dim_policy is not None:
+        result["dwh.dim_policy"] = selected_tables.dwh_dim_policy.dict()
+    
+    # Handle dwh.fact_claims_dtl
+    if selected_tables.dwh_fact_claims_dtl is not None:
+        result["dwh.fact_claims_dtl"] = selected_tables.dwh_fact_claims_dtl.dict()
+    
+    # Handle dwh.fact_premium
+    if selected_tables.dwh_fact_premium is not None:
+        result["dwh.fact_premium"] = selected_tables.dwh_fact_premium.dict()
+    
+    # Handle dwh.fct_policy
+    if selected_tables.dwh_fct_policy is not None:
+        result["dwh.fct_policy"] = selected_tables.dwh_fct_policy.dict()
+    
+    return result
 
 @app.post("/create-session")
 async def create_session(request: SessionRequest):
-    """First endpoint: Handle credentials and table selection for session creation.
-    
-    Expected input format:
-    {
-        "credentials": {...},
-        "available_tables": {
-            "dwh.dim_claims": true,
-            "dwh.dim_policy": false,
-            "dwh.fact_claims_dtl": true,
-            ...
-        }
-    }
-    """
+    """First endpoint: Handle credentials and table selection for session creation."""
     try:
-        # Extract selected tables from the input dict
-        selected_tables = [table_name for table_name, enabled in request.available_tables.items() if enabled]
+        # Convert structured model to dict for processing
+        available_tables_dict = convert_table_selection_to_dict(request.available_tables)
+        
+        # Extract selected tables from the dict
+        selected_tables = [table_name for table_name, enabled in available_tables_dict.items() if enabled]
         
         if not selected_tables:
             raise HTTPException(status_code=400, detail="At least one table must be selected")
@@ -1075,7 +1212,7 @@ async def create_session(request: SessionRequest):
         
         # Get details of selected tables
         selected_table_details = {}
-        for table_name, enabled in request.available_tables.items():
+        for table_name, enabled in available_tables_dict.items():
             if enabled and table_name in TABLE_DESCRIPTIONS:
                 table_info = TABLE_DESCRIPTIONS[table_name]
                 selected_table_details[table_name] = {
@@ -1095,20 +1232,12 @@ async def create_session(request: SessionRequest):
             enabled_tables=selected_tables
         )
         
-        # Prepare column data for next step - dict format for each selected table
-        next_step_columns = {}
-        for table_name in selected_tables:
-            columns_data = get_table_columns_data(table_name)
-            if "error" not in columns_data:
-                next_step_columns[table_name] = columns_data["columns"]  # {column_name: false}
-        
         return {
             "status": "Session created successfully",
             "selected_tables": selected_table_details,
             "session_data": session_data,
             "credentials_validated": True,
-            "next_step": "Use /validate-column-selection endpoint with your question and selected tables with columns",
-            "column_data_for_next_step": next_step_columns  # {table_name: {column_name: false}}
+            "next_step": "Use /validate-column-selection endpoint with your question and selected tables with columns"
         }
         
     except Exception as e:
@@ -1117,30 +1246,13 @@ async def create_session(request: SessionRequest):
 
 @app.post("/validate-column-selection")
 async def validate_column_selection(request: ColumnValidationRequest):
-    """Second endpoint: Column selection validation and RAG comparison.
-    
-    Expected input format:
-    {
-        "question": "What are the total claims by status?",
-        "selected_tables_with_columns": {
-            "dwh.dim_claims": {
-                "claim_reference_id": true,
-                "status": true,
-                "claim_total_claimed_amount": true,
-                "date_claim_first_notified": false,
-                ...
-            },
-            "dwh.fact_claims_dtl": {
-                "claim_reference_id": true,
-                "Paid_Amount": true,
-                ...
-            }
-        }
-    }
-    """
+    """Second endpoint: Column selection validation and RAG comparison."""
     try:
-        # Extract selected tables from the input dict
-        selected_tables = list(request.selected_tables_with_columns.keys())
+        # Convert structured model to dict for processing
+        selected_tables_with_columns_dict = convert_column_selection_to_dict(request.selected_tables_with_columns)
+        
+        # Extract selected tables from the dict
+        selected_tables = list(selected_tables_with_columns_dict.keys())
         
         # Validate that selected tables exist
         invalid_tables = [table for table in selected_tables if table not in TABLE_DESCRIPTIONS]
@@ -1150,7 +1262,7 @@ async def validate_column_selection(request: ColumnValidationRequest):
         # Process column selections
         table_column_details = {}
         
-        for table_name, columns_dict in request.selected_tables_with_columns.items():
+        for table_name, columns_dict in selected_tables_with_columns_dict.items():
             table_info = TABLE_DESCRIPTIONS[table_name]
             
             # Validate columns exist in the table
@@ -1261,6 +1373,56 @@ async def validate_column_selection(request: ColumnValidationRequest):
     except Exception as e:
         logger.error(f"Column validation error: {e}")
         raise HTTPException(status_code=500, detail=f"Column validation failed: {str(e)}")
+
+# Helper functions to get available tables data (for frontend to populate the request)
+def get_available_tables_data():
+    """Helper function to get all available tables - returns dict format {table_name: false}."""
+    try:
+        available_tables = {}
+        table_details = {}
+        
+        for table_name, table_info in TABLE_DESCRIPTIONS.items():
+            available_tables[table_name] = False  # Default to not selected
+            table_details[table_name] = {
+                "description": table_info["description"],
+                "total_columns": len(table_info["columns"])
+            }
+        
+        return {
+            "available_tables": available_tables,  # {table_name: false}
+            "table_details": table_details,  # Additional info for frontend
+            "total_tables": len(available_tables)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting available tables: {e}")
+        return {"error": f"Failed to get available tables: {str(e)}"}
+
+def get_table_columns_data(table_name: str):
+    """Helper function to get columns for a specific table - returns dict format {column_name: false}."""
+    try:
+        if table_name not in TABLE_DESCRIPTIONS:
+            return {"error": f"Table {table_name} not found"}
+        
+        table_info = TABLE_DESCRIPTIONS[table_name]
+        columns = {}
+        column_details = {}
+        
+        for col_name, col_description in table_info["columns"].items():
+            columns[col_name] = False  # Default to not selected
+            column_details[col_name] = col_description
+        
+        return {
+            "table_name": table_name,
+            "table_description": table_info["description"],
+            "columns": columns,  # {column_name: false}
+            "column_details": column_details,  # Additional info for frontend
+            "total_columns": len(columns)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting table columns: {e}")
+        return {"error": f"Failed to get table columns: {str(e)}"}
 
 
 
