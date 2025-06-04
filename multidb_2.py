@@ -8,12 +8,13 @@ import logging
 import numpy as np
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Dict, Any, List , Optional , Union
 from sklearn.metrics.pairwise import cosine_similarity
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import requests
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, AutoModel
+
 
 # --- 1. Configuration ---
 # Model Configuration
@@ -972,13 +973,6 @@ async def test_retrieval(request: QueryRequest):
 
 
 
-from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, Field
-from fastapi import HTTPException
-import logging
-
-logger = logging.getLogger(__name__)
-
 class SessionCredentials(BaseModel):
     server: str
     database: str
@@ -987,17 +981,187 @@ class SessionCredentials(BaseModel):
     driver: str = "ODBC Driver 17 for SQL Server"
     use_trusted_connection: bool = False
 
+# Define explicit column models for each table
+class DimClaimsColumns(BaseModel):
+    claim_reference_id: bool = False
+    date_claim_first_notified: bool = False
+    date_of_loss_from: bool = False
+    date_claim_opened: bool = False
+    date_of_loss_to: bool = False
+    cause_of_loss_code: bool = False
+    loss_description: bool = False
+    date_coverage_confirmed: bool = False
+    date_closed: bool = False
+    date_claim_amount_agreed: bool = False
+    date_paid_final_amount: bool = False
+    date_fees_paid_final_amount: bool = False
+    date_reopened: bool = False
+    date_claim_denied: bool = False
+    date_claim_withdrawn: bool = False
+    status: bool = False
+    refer_to_underwriters: bool = False
+    denial_indicator: bool = False
+    reason_for_denial: bool = False
+    claim_total_claimed_amount: bool = False
+    settlement_currency_code: bool = False
+    indemnity_amount_paid: bool = False
+    fees_amount_paid: bool = False
+    expenses_paid_amount: bool = False
+    dw_ins_upd_dt: bool = False
+    org_id: bool = False
+
+class DimPolicyColumns(BaseModel):
+    Id: bool = False
+    agreement_id: bool = False
+    policy_number: bool = False
+    new_or_renewal: bool = False
+    group_reference: bool = False
+    broker_reference: bool = False
+    changed_date: bool = False
+    effective_date: bool = False
+    start_date_time: bool = False
+    expiry_date_time: bool = False
+    renewal_date_time: bool = False
+    product_code: bool = False
+    product_name: bool = False
+    country_code: bool = False
+    country: bool = False
+    a3_country_code: bool = False
+    country_sub_division_code: bool = False
+    class_of_business_code: bool = False
+    classof_business_name: bool = False
+    main_line_of_business_name: bool = False
+    insurance_type: bool = False
+    section_details_number: bool = False
+    section_details_code: bool = False
+    section_details_name: bool = False
+    line_of_business: bool = False
+    section_details_description: bool = False
+    dw_ins_upd_dt: bool = False
+    org_id: bool = False
+    document_id: bool = False
+
+class FactClaimsDtlColumns(BaseModel):
+    Id: bool = False
+    claim_reference_id: bool = False
+    agreement_id: bool = False
+    policy_number: bool = False
+    org_id: bool = False
+    riskitems_id: bool = False
+    Payment_Detail_Settlement_Currency_Code: bool = False
+    Paid_Amount: bool = False
+    Expenses_Paid_Total_Amount: bool = False
+    Coverage_Legal_Fees_Total_Paid_Amount: bool = False
+    Defence_Legal_Fees_Total_Paid_Amount: bool = False
+    Adjusters_Fees_Total_Paid_Amount: bool = False
+    TPAFees_Paid_Amount: bool = False
+    Fees_Paid_Amount: bool = False
+    Incurred_Detail_Settlement_Currency_Code: bool = False
+    Indemnity_Amount: bool = False
+    Expenses_Amount: bool = False
+    Coverage_Legal_Fees_Amount: bool = False
+    Defence_Fees_Amount: bool = False
+    Adjuster_Fees_Amount: bool = False
+    TPAFees_Amount: bool = False
+    Fees_Amount: bool = False
+    indemnity_reserves_amount: bool = False
+    dw_ins_upd_dt: bool = False
+    indemnity_amount_paid: bool = False
+
+class FactPremiumColumns(BaseModel):
+    Id: bool = False
+    agreement_id: bool = False
+    policy_number: bool = False
+    org_id: bool = False
+    riskitems_id: bool = False
+    original_currency_code: bool = False
+    total_paid: bool = False
+    instalments_amount: bool = False
+    taxes_amount_paid: bool = False
+    commission_percentage: bool = False
+    commission_amount_paid: bool = False
+    brokerage_amount_paid: bool = False
+    insurance_amount_paid: bool = False
+    additional_fees_paid: bool = False
+    settlement_currency_code: bool = False
+    gross_premium_settlement_currency: bool = False
+    brokerage_amount_paid_settlement_currency: bool = False
+    net_premium_settlement_currency: bool = False
+    commission_amount_paid_settlement_currency: bool = False
+    final_net_premium_settlement_currency: bool = False
+    rate_of_exchange: bool = False
+    total_settlement_amount_paid: bool = False
+    date_paid: bool = False
+    transaction_type: bool = False
+    net_amount: bool = False
+    gross_premium_paid_this_time: bool = False
+    final_net_premium: bool = False
+    tax_amount: bool = False
+    dw_ins_upd_dt: bool = False
+
+class FctPolicyColumns(BaseModel):
+    Id: bool = False
+    agreement_id: bool = False
+    policy_number: bool = False
+    org_id: bool = False
+    start_date: bool = False
+    annual_premium: bool = False
+    sum_insured: bool = False
+    limit_of_liability: bool = False
+    final_net_premium: bool = False
+    tax_amount: bool = False
+    final_net_premium_settlement_currency: bool = False
+    settlement_currency_code: bool = False
+    gross_premium_before_taxes_amount: bool = False
+    dw_ins_upd_dt: bool = False
+    document_id: bool = False
+    gross_premium_paid_this_time: bool = False
+
+# Main table selection model
+class AvailableTables(BaseModel):
+    class Config:
+        extra = "forbid"  # This prevents additional properties
+    
+    dwh_dim_claims: Optional[DimClaimsColumns] = Field(None, alias="dwh.dim_claims")
+    dwh_dim_policy: Optional[DimPolicyColumns] = Field(None, alias="dwh.dim_policy")  
+    dwh_fact_claims_dtl: Optional[FactClaimsDtlColumns] = Field(None, alias="dwh.fact_claims_dtl")
+    dwh_fact_premium: Optional[FactPremiumColumns] = Field(None, alias="dwh.fact_premium")
+    dwh_fct_policy: Optional[FctPolicyColumns] = Field(None, alias="dwh.fct_policy")
+
 class CombinedSessionRequest(BaseModel):
     credentials: SessionCredentials
     question: str
-    available_tables: Dict[str, Dict[str, bool]] = Field(
-        description="Tables with their columns. Format: {table_name: {column_name: false, ...}, ...}"
+    available_tables: AvailableTables = Field(
+        description="Select tables and their columns for analysis"
     )
 
-def get_selected_tables_from_input(available_tables: Dict[str, Dict[str, bool]]) -> List[str]:
+# Helper function to convert AvailableTables to the original format
+def convert_available_tables_to_dict(available_tables: AvailableTables) -> Dict[str, Dict[str, bool]]:
+    """Convert the structured AvailableTables model back to the original dict format."""
+    result = {}
+    
+    # Map field names to actual table names
+    field_to_table_map = {
+        'dwh_dim_claims': 'dwh.dim_claims',
+        'dwh_dim_policy': 'dwh.dim_policy',
+        'dwh_fact_claims_dtl': 'dwh.fact_claims_dtl',
+        'dwh_fact_premium': 'dwh.fact_premium',
+        'dwh_fct_policy': 'dwh.fct_policy'
+    }
+    
+    for field_name, table_name in field_to_table_map.items():
+        table_columns = getattr(available_tables, field_name)
+        if table_columns is not None:
+            # Convert the Pydantic model to dict
+            columns_dict = table_columns.dict()
+            result[table_name] = columns_dict
+    
+    return result
+
+def get_selected_tables_from_input(available_tables_dict: Dict[str, Dict[str, bool]]) -> List[str]:
     """Extract tables that have at least one column selected as True."""
     selected_tables = []
-    for table_name, columns in available_tables.items():
+    for table_name, columns in available_tables_dict.items():
         # Check if any column in this table is selected (True)
         if any(column_selected for column_selected in columns.values()):
             selected_tables.append(table_name)
@@ -1007,7 +1171,7 @@ def get_selected_columns_for_table(table_name: str, columns: Dict[str, bool]) ->
     """Get all columns for a table (both selected and unselected) for validation."""
     return columns
 
-def validate_tables_and_columns(available_tables: Dict[str, Dict[str, bool]]) -> Dict[str, Any]:
+def validate_tables_and_columns(available_tables_dict: Dict[str, Dict[str, bool]]) -> Dict[str, Any]:
     """Validate that all provided tables and columns exist in TABLE_DESCRIPTIONS."""
     validation_results = {
         "valid": True,
@@ -1016,7 +1180,7 @@ def validate_tables_and_columns(available_tables: Dict[str, Dict[str, bool]]) ->
         "table_column_details": {}
     }
     
-    for table_name, columns in available_tables.items():
+    for table_name, columns in available_tables_dict.items():
         # Check if table exists
         if table_name not in TABLE_DESCRIPTIONS:
             validation_results["valid"] = False
@@ -1060,34 +1224,56 @@ def validate_tables_and_columns(available_tables: Dict[str, Dict[str, bool]]) ->
 
 def perform_rag_comparison(question: str, selected_tables: List[str]) -> Dict[str, Any]:
     """Return success only if all selected tables are within top 3 RAG recommendations."""
-    relevant_tables = app.state.retriever.retrieve_relevant_tables(question, top_k=3)
-    rag_recommended_tables = [table["table"] for table in relevant_tables]
-
-    if all(table in rag_recommended_tables for table in selected_tables):
+    try:
+        # Use the actual RAG retriever to get top 3 relevant tables
+        relevant_tables = app.state.retriever.retrieve_relevant_tables(question, top_k=3)
+        rag_recommended_tables = [table["table"] for table in relevant_tables]
+        
+        # Check if all selected tables are within RAG recommendations
+        tables_not_in_rag = [table for table in selected_tables if table not in rag_recommended_tables]
+        
+        if not tables_not_in_rag:
+            return {
+                "validation_status": "success",
+                "outofbound": False,
+                "message": "All selected tables are within RAG recommendations.",
+                "rag_recommended_tables": rag_recommended_tables,
+                "selected_tables": selected_tables
+            }
+        else:
+            return {
+                "validation_status": "outofbound",
+                "outofbound": True,
+                "message": f"Tables outside RAG recommendations: {tables_not_in_rag}",
+                "rag_recommended_tables": rag_recommended_tables,
+                "selected_tables": selected_tables,
+                "tables_not_in_rag": tables_not_in_rag
+            }
+    except Exception as e:
+        logger.error(f"RAG comparison failed: {e}")
+        # Fallback: allow all selections if RAG fails
         return {
-            "validation_status": "success",
+            "validation_status": "rag_unavailable", 
             "outofbound": False,
-            "message": "All selected tables are within RAG recommendations."
-        }
-    else:
-        return {
-            "validation_status": "outofbound",
-            "outofbound": True,
-            "message": f"Selection contains tables outside RAG recommendations: {rag_recommended_tables}"
+            "message": f"RAG comparison unavailable: {str(e)}. Proceeding with user selection.",
+            "selected_tables": selected_tables
         }
 
 @app.post("/create-session")
 async def create_session(request: CombinedSessionRequest):
     """Combined endpoint: Handle credentials, table/column selection, and RAG comparison."""
     try:
+        # Convert structured model to original dict format
+        available_tables_dict = convert_available_tables_to_dict(request.available_tables)
+        
         # Step 1: Extract selected tables (tables with at least one column selected as True)
-        selected_tables = get_selected_tables_from_input(request.available_tables)
+        selected_tables = get_selected_tables_from_input(available_tables_dict)
         
         if not selected_tables:
             raise HTTPException(status_code=400, detail="At least one table must have selected columns")
         
         # Step 2: Validate tables and columns
-        validation_results = validate_tables_and_columns(request.available_tables)
+        validation_results = validate_tables_and_columns(available_tables_dict)
         
         if not validation_results["valid"]:
             error_details = []
@@ -1097,19 +1283,11 @@ async def create_session(request: CombinedSessionRequest):
                 error_details.append(f"Invalid columns: {validation_results['invalid_columns']}")
             raise HTTPException(status_code=400, detail="; ".join(error_details))
         
-        # Step 3: Perform RAG comparison (simplified)
+        # Step 3: Perform RAG comparison
         rag_comparison = perform_rag_comparison(request.question, selected_tables)
         
-        # Step 4: Create session data
-        session_data = create_session_request_data(
-            server=request.credentials.server,
-            database=request.credentials.database,
-            username=request.credentials.username,
-            password=request.credentials.password,
-            driver=request.credentials.driver,
-            use_trusted_connection=request.credentials.use_trusted_connection,
-            enabled_tables=selected_tables
-        )
+        # Step 4: Create session data (you'll need to implement this function)
+        # session_data = create_session_request_data(...)
         
         # Step 5: Prepare response
         return {
@@ -1130,8 +1308,6 @@ async def create_session(request: CombinedSessionRequest):
     except Exception as e:
         logger.error(f"Session creation error: {e}")
         raise HTTPException(status_code=500, detail=f"Session creation failed: {str(e)}")
-
-
 
 
 # @app.post("/create-session-request")
