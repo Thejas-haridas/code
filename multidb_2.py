@@ -987,43 +987,31 @@ class SessionCredentials(BaseModel):
     driver: str = "ODBC Driver 17 for SQL Server"
     use_trusted_connection: bool = False
 
-class TableSelection(BaseModel):
-    table_name: str
-    description: str
-    enabled: bool = False
-
 class SessionRequest(BaseModel):
     credentials: SessionCredentials
-    available_tables: List[TableSelection]  # Now comes as input
-
-class ColumnSelection(BaseModel):
-    column_name: str
-    description: str
-    enabled: bool = False
-
-class TableColumnInput(BaseModel):
-    table_name: str
-    columns: List[ColumnSelection]
+    available_tables: Dict[str, bool]  # Format: {table_name: enabled}
 
 class ColumnValidationRequest(BaseModel):
     question: str
-    selected_tables_with_columns: List[TableColumnInput]  # Now comes as input with columns
+    selected_tables_with_columns: Dict[str, Dict[str, bool]]  # Format: {table_name: {column_name: enabled}}
 
 # Helper function to get available tables (for frontend to populate the request)
 def get_available_tables_data():
-    """Helper function to get all available tables - use this in your frontend to populate SessionRequest."""
+    """Helper function to get all available tables - returns dict format {table_name: false}."""
     try:
-        available_tables = []
+        available_tables = {}
+        table_details = {}
+        
         for table_name, table_info in TABLE_DESCRIPTIONS.items():
-            available_tables.append({
-                "table_name": table_name,
+            available_tables[table_name] = False  # Default to not selected
+            table_details[table_name] = {
                 "description": table_info["description"],
-                "enabled": False,
                 "total_columns": len(table_info["columns"])
-            })
+            }
         
         return {
-            "available_tables": available_tables,
+            "available_tables": available_tables,  # {table_name: false}
+            "table_details": table_details,  # Additional info for frontend
             "total_tables": len(available_tables)
         }
         
@@ -1033,25 +1021,24 @@ def get_available_tables_data():
 
 # Helper function to get table columns (for frontend to populate the column validation request)
 def get_table_columns_data(table_name: str):
-    """Helper function to get columns for a specific table - use this in your frontend."""
+    """Helper function to get columns for a specific table - returns dict format {column_name: false}."""
     try:
         if table_name not in TABLE_DESCRIPTIONS:
             return {"error": f"Table {table_name} not found"}
         
         table_info = TABLE_DESCRIPTIONS[table_name]
-        columns = []
+        columns = {}
+        column_details = {}
         
         for col_name, col_description in table_info["columns"].items():
-            columns.append({
-                "column_name": col_name,
-                "description": col_description,
-                "enabled": False
-            })
+            columns[col_name] = False  # Default to not selected
+            column_details[col_name] = col_description
         
         return {
             "table_name": table_name,
             "table_description": table_info["description"],
-            "columns": columns,
+            "columns": columns,  # {column_name: false}
+            "column_details": column_details,  # Additional info for frontend
             "total_columns": len(columns)
         }
         
@@ -1063,11 +1050,20 @@ def get_table_columns_data(table_name: str):
 async def create_session(request: SessionRequest):
     """First endpoint: Handle credentials and table selection for session creation.
     
-    The available_tables should be populated using get_available_tables_data() helper function.
+    Expected input format:
+    {
+        "credentials": {...},
+        "available_tables": {
+            "dwh.dim_claims": true,
+            "dwh.dim_policy": false,
+            "dwh.fact_claims_dtl": true,
+            ...
+        }
+    }
     """
     try:
-        # Extract selected tables from the input
-        selected_tables = [table.table_name for table in request.available_tables if table.enabled]
+        # Extract selected tables from the input dict
+        selected_tables = [table_name for table_name, enabled in request.available_tables.items() if enabled]
         
         if not selected_tables:
             raise HTTPException(status_code=400, detail="At least one table must be selected")
@@ -1079,10 +1075,10 @@ async def create_session(request: SessionRequest):
         
         # Get details of selected tables
         selected_table_details = {}
-        for table in request.available_tables:
-            if table.enabled and table.table_name in TABLE_DESCRIPTIONS:
-                table_info = TABLE_DESCRIPTIONS[table.table_name]
-                selected_table_details[table.table_name] = {
+        for table_name, enabled in request.available_tables.items():
+            if enabled and table_name in TABLE_DESCRIPTIONS:
+                table_info = TABLE_DESCRIPTIONS[table_name]
+                selected_table_details[table_name] = {
                     "description": table_info["description"],
                     "total_columns": len(table_info["columns"]),
                     "enabled": True
@@ -1099,15 +1095,12 @@ async def create_session(request: SessionRequest):
             enabled_tables=selected_tables
         )
         
-        # Prepare column data for next step
-        next_step_columns = []
+        # Prepare column data for next step - dict format for each selected table
+        next_step_columns = {}
         for table_name in selected_tables:
             columns_data = get_table_columns_data(table_name)
             if "error" not in columns_data:
-                next_step_columns.append({
-                    "table_name": table_name,
-                    "columns": columns_data["columns"]
-                })
+                next_step_columns[table_name] = columns_data["columns"]  # {column_name: false}
         
         return {
             "status": "Session created successfully",
@@ -1115,7 +1108,7 @@ async def create_session(request: SessionRequest):
             "session_data": session_data,
             "credentials_validated": True,
             "next_step": "Use /validate-column-selection endpoint with your question and selected tables with columns",
-            "column_data_for_next_step": next_step_columns  # Provide this for frontend to populate next request
+            "column_data_for_next_step": next_step_columns  # {table_name: {column_name: false}}
         }
         
     except Exception as e:
@@ -1126,12 +1119,28 @@ async def create_session(request: SessionRequest):
 async def validate_column_selection(request: ColumnValidationRequest):
     """Second endpoint: Column selection validation and RAG comparison.
     
-    The selected_tables_with_columns should be populated using the column_data_for_next_step 
-    from the create-session response or by calling get_table_columns_data() for each selected table.
+    Expected input format:
+    {
+        "question": "What are the total claims by status?",
+        "selected_tables_with_columns": {
+            "dwh.dim_claims": {
+                "claim_reference_id": true,
+                "status": true,
+                "claim_total_claimed_amount": true,
+                "date_claim_first_notified": false,
+                ...
+            },
+            "dwh.fact_claims_dtl": {
+                "claim_reference_id": true,
+                "Paid_Amount": true,
+                ...
+            }
+        }
+    }
     """
     try:
-        # Extract selected tables and their columns
-        selected_tables = [table.table_name for table in request.selected_tables_with_columns]
+        # Extract selected tables from the input dict
+        selected_tables = list(request.selected_tables_with_columns.keys())
         
         # Validate that selected tables exist
         invalid_tables = [table for table in selected_tables if table not in TABLE_DESCRIPTIONS]
@@ -1140,42 +1149,41 @@ async def validate_column_selection(request: ColumnValidationRequest):
         
         # Process column selections
         table_column_details = {}
-        column_selections = {}  # Convert to the format expected by existing logic
         
-        for table_input in request.selected_tables_with_columns:
-            table_name = table_input.table_name
+        for table_name, columns_dict in request.selected_tables_with_columns.items():
             table_info = TABLE_DESCRIPTIONS[table_name]
             
             # Validate columns exist in the table
             valid_columns = set(table_info["columns"].keys())
-            input_columns = {col.column_name for col in table_input.columns}
+            input_columns = set(columns_dict.keys())
             invalid_columns = input_columns - valid_columns
             
             if invalid_columns:
                 raise HTTPException(
                     status_code=400, 
-                    detail=f"Invalid columns for table {table_name}: {invalid_columns}"
+                    detail=f"Invalid columns for table {table_name}: {list(invalid_columns)}"
                 )
             
             columns_info = {}
-            column_selections[table_name] = {}
+            selected_columns_count = 0
             
-            for col_input in table_input.columns:
-                col_name = col_input.column_name
-                col_description = table_info["columns"].get(col_name, col_input.description)
+            for col_name, enabled in columns_dict.items():
+                col_description = table_info["columns"].get(col_name, "No description available")
                 
                 columns_info[col_name] = {
                     "description": col_description,
-                    "enabled": col_input.enabled,
+                    "enabled": enabled,
                     "data_type": "varchar/int/datetime",  # You can enhance this with actual data types
                 }
-                column_selections[table_name][col_name] = col_input.enabled
+                
+                if enabled:
+                    selected_columns_count += 1
             
             table_column_details[table_name] = {
                 "table_description": table_info["description"],
                 "columns": columns_info,
                 "total_columns": len(columns_info),
-                "selected_columns": sum(1 for col in columns_info.values() if col["enabled"])
+                "selected_columns": selected_columns_count
             }
         
         # Use RAG retriever to get top 3 relevant tables for the question
