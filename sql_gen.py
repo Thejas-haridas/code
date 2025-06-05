@@ -20,7 +20,7 @@ from jose import JWTError, jwt
 from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 import socket
-import pyodbc
+import sqlite3
 
 # JWT settings
 SECRET_KEY = "your-secret-key"  # Replace with a strong key
@@ -294,22 +294,42 @@ def generate_sql_with_rag(question: str, retriever: SchemaRetriever) -> Tuple[st
     return sql_query, retrieved_table_names, generation_time
 
 
-# Configuration
-SECRET_KEY = "your-super-secret-key-change-this-in-production"  # Change this!
+# --- Config ---
+SECRET_KEY = "your-super-secret-key-change-this-in-production"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# Database configuration
-DATABASE_CONFIG = {
-    "server": "tcp:sqldb-dash-test.database.windows.net,1433",
-    "database": "sqldw",
-    "username": "admintest",
-    "password": "X4$wDv!cTyR",
-    "driver": "{ODBC Driver 17 for SQL Server}",
-    "timeout": 30
-}
+# --- DB Path ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "users.db")
 
-# Models
+# --- DB Connection ---
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+# --- Initialize DB ---
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            disabled BOOLEAN NOT NULL DEFAULT 0
+        )
+    ''')
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+@app.on_event("startup")
+def startup_event():
+    init_db()
+
+# --- Models ---
 class User(BaseModel):
     username: str
     password: str
@@ -322,26 +342,18 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     username: Optional[str] = None
 
-# Security
+# --- Security ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-def get_db_connection():
-    conn_str = (
-        f"DRIVER={DATABASE_CONFIG['driver']};"
-        f"SERVER={DATABASE_CONFIG['server']};"
-        f"DATABASE={DATABASE_CONFIG['database']};"
-        f"UID={DATABASE_CONFIG['username']};"
-        f"PWD={DATABASE_CONFIG['password']}"
-    )
-    try:
-        return pyodbc.connect(conn_str, timeout=DATABASE_CONFIG['timeout'])
-    except pyodbc.Error as e:
-        print(f"Database connection error: {e}")
-        raise
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
 
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+# --- User operations ---
 def get_user(username: str):
-    """Get user from database"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -349,20 +361,15 @@ def get_user(username: str):
         row = cursor.fetchone()
         cursor.close()
         conn.close()
-        
+
         if row:
-            return {"username": row[0], "password": row[1], "disabled": bool(row[2])}
+            return {"username": row["username"], "password": row["password"], "disabled": bool(row["disabled"])}
         return None
     except Exception as e:
         print(f"Error getting user: {e}")
         return None
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify password against hash"""
-    return pwd_context.verify(plain_password, hashed_password)
-
 def authenticate_user(username: str, password: str):
-    """Authenticate user with username and password"""
     user = get_user(username)
     if not user:
         return False
@@ -371,25 +378,24 @@ def authenticate_user(username: str, password: str):
     return user
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    """Create JWT access token"""
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
         expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    
+
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
+# --- Auth Dependencies ---
 async def get_current_user(token: str = Depends(oauth2_scheme)):
-    """Get current user from JWT token"""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
@@ -398,34 +404,30 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         token_data = TokenData(username=username)
     except JWTError:
         raise credentials_exception
-    
+
     user = get_user(username=token_data.username)
     if user is None:
         raise credentials_exception
     return user
 
 async def get_current_active_user(current_user: dict = Depends(get_current_user)):
-    """Get current active user"""
     if current_user.get("disabled"):
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
 
+# --- Routes ---
 @app.post("/register")
 async def register(user: User):
-    """Register a new user"""
-    # Check if user already exists
     existing_user = get_user(user.username)
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail="Username already exists"
         )
-    
-    # Hash password
-    hashed_password = pwd_context.hash(user.password)
-    
+
+    hashed_password = get_password_hash(user.password)
+
     try:
-        # Insert into SQL Server database
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
@@ -435,7 +437,7 @@ async def register(user: User):
         conn.commit()
         cursor.close()
         conn.close()
-        
+
         return {"message": "User registered successfully"}
     except Exception as e:
         print(f"Registration error: {e}")
@@ -446,7 +448,6 @@ async def register(user: User):
 
 @app.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    """Login and get access token"""
     user = authenticate_user(form_data.username, form_data.password)
     if not user:
         raise HTTPException(
@@ -454,15 +455,15 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user["username"]}, 
         expires_delta=access_token_expires
     )
-    
-    return {"access_token": access_token, "token_type": "bearer"}
 
+    return {"access_token": access_token, "token_type": "bearer"}
+    
 #----utility endpoints-----
 # Pydantic Models
 class TableColumn(BaseModel):
