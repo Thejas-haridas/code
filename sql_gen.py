@@ -10,7 +10,8 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from typing import Tuple, Dict, Any, List , Optional , Union
 from sklearn.metrics.pairwise import cosine_similarity
-from fastapi import FastAPI, HTTPException , Depends
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 import requests
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, AutoModel
@@ -218,6 +219,7 @@ def generate_sql_with_rag_session(question: str, retriever: SchemaRetriever, sch
     return sql_query, retrieved_table_names, generation_time
 
 #--- create access token api -------
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     """
     This function is used to get the current active user.
