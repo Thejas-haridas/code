@@ -143,23 +143,34 @@ class SchemaRetriever:
             return True
         return False
     
-    def retrieve_relevant_tables(self, question: str, top_k: int = 3) -> List[Dict]:
-        """Retrieve top-k most relevant tables for the given question."""
-        if self.embeddings is None:
-            if not self.load_embeddings():
-                self.create_embeddings()
-        if self.embedding_model is None:
-            self.load_embedding_model()
-        # Create embedding for the question
-        question_embedding = self.embedding_model.encode([question])
-        # Calculate cosine similarities
-        similarities = cosine_similarity(question_embedding, self.embeddings)[0]
-        # Get top-k indices
-        top_indices = np.argsort(similarities)[::-1][:top_k]
-        # Return relevant table chunks
-        relevant_tables = [self.table_chunks[i] for i in top_indices]
-        logger.info(f"Retrieved {len(relevant_tables)} relevant tables: {[t['table'] for t in relevant_tables]}")
-        return relevant_tables
+def retrieve_relevant_tables(self, question: str, top_k: int = 3) -> tuple:
+    """Retrieve top-k most relevant tables for the given question."""
+    retrieval_start_time = time.time()
+    
+    if self.embeddings is None:
+        if not self.load_embeddings():
+            self.create_embeddings()
+    if self.embedding_model is None:
+        self.load_embedding_model()
+    
+    # Create embedding for the question
+    question_embedding = self.embedding_model.encode([question])
+    
+    # Calculate cosine similarities
+    similarities = cosine_similarity(question_embedding, self.embeddings)[0]
+    
+    # Get top-k indices
+    top_indices = np.argsort(similarities)[::-1][:top_k]
+    
+    # Return relevant table chunks
+    relevant_tables = [self.table_chunks[i] for i in top_indices]
+    
+    retrieval_time = time.time() - retrieval_start_time
+    
+    logger.info(f"Retrieved {len(relevant_tables)} relevant tables: {[t['table'] for t in relevant_tables]} in {retrieval_time:.4f}s")
+    
+    return relevant_tables, retrieval_time
+
 def construct_rag_prompt_with_rules(question: str, relevant_tables: List[Dict], join_conditions: str, database_rules: str) -> str:
     """Creates a structured prompt using retrieved schema elements and database-specific rules."""
     # Build schema section from retrieved tables
@@ -313,8 +324,8 @@ def generate_sql_with_rag_session(question: str, retriever: SchemaRetriever, sch
     """Generate SQL query using RAG approach with session-specific schema information."""
     start_time = time.time()
     
-    # Retrieve relevant tables
-    relevant_tables = retriever.retrieve_relevant_tables(question, top_k=top_k)
+    # Retrieve relevant tables - now returns retrieval time as well
+    relevant_tables, retrieval_time = retriever.retrieve_relevant_tables(question, top_k=top_k)
     retrieved_table_names = [table['table'] for table in relevant_tables]
     
     # Construct prompt with retrieved schema and database-specific rules
@@ -325,14 +336,13 @@ def generate_sql_with_rag_session(question: str, retriever: SchemaRetriever, sch
         schema_info["database_rules"]
     )
     
-    # Generate SQL using existing function (you'll provide this)
+    # Generate SQL using existing function
     response = generate_text_optimized(prompt, app.state.sql_model, app.state.sql_tokenizer, max_new_tokens=300)
     sql_query = extract_sql_from_response(response)
     
     generation_time = time.time() - start_time
     
-    return sql_query, retrieved_table_names, generation_time
-
+    return sql_query, retrieved_table_names, retrieval_time, generation_time
 
 
 # --- Config ---
@@ -691,9 +701,9 @@ async def generate_sql(request: SQLGenerationRequest, current_user: dict = Depen
         if not retriever.load_embeddings():
             raise HTTPException(status_code=500, detail="Failed to load embeddings")
         
-        # CHANGE THIS LINE - Use asyncio.get_event_loop() instead of app.state.loop
+        # Use asyncio.get_event_loop() and get both retrieval and generation times
         loop = asyncio.get_event_loop()
-        sql_query, retrieved_table_names, sql_generation_time = await loop.run_in_executor(
+        sql_query, retrieved_table_names, retrieval_time, sql_generation_time = await loop.run_in_executor(
             executor, generate_sql_with_rag_session, 
             request.question, retriever, schema_info, request.top_k
         )
@@ -706,7 +716,7 @@ async def generate_sql(request: SQLGenerationRequest, current_user: dict = Depen
             question=request.question,
             retrieved_tables=retrieved_table_names,
             generated_sql=sql_query,
-            retrieval_time=0.000,
+            retrieval_time=retrieval_time,  # Now using actual retrieval time
             sql_generation_time=sql_generation_time
         )
         
@@ -714,7 +724,6 @@ async def generate_sql(request: SQLGenerationRequest, current_user: dict = Depen
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"SQL generation failed: {str(e)}")
-
         
 
 
