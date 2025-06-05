@@ -623,7 +623,7 @@ async def generate_sql(request: SQLGenerationRequest):
             request.question, retriever
         )
         
-       return {
+    return {
            "question": request.question,
            "retrieved_tables": retrieved_tables,
            "generated_sql": sql_query,
