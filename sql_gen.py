@@ -636,7 +636,7 @@ async def generate_sql(request: SQLGenerationRequest):
         
         # Generate SQL using existing function
         sql_query, retrieved_table_names, sql_generation_time = await app.state.loop.run_in_executor(
-            executor, generate_sql_with_rag_session, 
+            executor, generate_sql_with_rag, 
             request.question, retriever, schema_info, request.top_k
         )
         
