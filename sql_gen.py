@@ -198,7 +198,17 @@ Generate a SQL query that answers the following question using only the provided
 ```sql
 """
     return prompt
-
+    
+@contextmanager
+def inference_mode():
+    """Context manager for optimized inference."""
+    with torch.no_grad():
+        if torch.cuda.is_available():
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                yield
+        else:
+            yield
+            
 def generate_text_optimized(prompt: str, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, max_new_tokens: int, temperature: float = 0.0) -> str:
     """Highly optimized text generation function."""
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
