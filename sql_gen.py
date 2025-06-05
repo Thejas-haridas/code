@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Schema Management and SQL Generator", version="1.0.0")
 executor = ThreadPoolExecutor(max_workers=os.cpu_count() * 2)
+app.state.loop = asyncio.get_event_loop()
 
 # Hardcoded T-SQL Rules for different database servers
 DATABASE_RULES = {
