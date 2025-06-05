@@ -278,20 +278,30 @@ def clean_tsql_query(sql_query: str) -> str:
         result = result[:-1]
     return result
 
-def generate_sql_with_rag(question: str, retriever: SchemaRetriever) -> Tuple[str, List[str], float]:
-    """Generates SQL query using RAG approach with schema retrieval."""
+def generate_sql_with_rag_session(question: str, retriever: SchemaRetriever, schema_info: Dict, top_k: int = 3) -> tuple:
+    """Generate SQL query using RAG approach with session-specific schema information."""
     start_time = time.time()
+    
     # Retrieve relevant tables
-    relevant_tables = retriever.retrieve_relevant_tables(question, top_k=3)
+    relevant_tables = retriever.retrieve_relevant_tables(question, top_k=top_k)
     retrieved_table_names = [table['table'] for table in relevant_tables]
-    # Construct prompt with retrieved schema
-    prompt = construct_rag_prompt(question, relevant_tables)
-    # Generate SQL
+    
+    # Construct prompt with retrieved schema and database-specific rules
+    prompt = construct_rag_prompt_with_rules(
+        question, 
+        relevant_tables, 
+        schema_info["join_conditions"], 
+        schema_info["database_rules"]
+    )
+    
+    # Generate SQL using existing function (you'll provide this)
     response = generate_text_optimized(prompt, app.state.sql_model, app.state.sql_tokenizer, max_new_tokens=300)
     sql_query = extract_sql_from_response(response)
+    
     generation_time = time.time() - start_time
-    logger.info(f"SQL generated with RAG in {generation_time:.2f}s using tables: {retrieved_table_names}")
+    
     return sql_query, retrieved_table_names, generation_time
+
 
 
 # --- Config ---
@@ -326,8 +336,16 @@ def init_db():
     conn.close()
 
 @app.on_event("startup")
-def startup_event():
+async def startup_event():
     init_db()
+    """Load both models on application startup."""
+    app.state.device = setup_device()
+    # Initialize RAG retriever
+    app.state.retriever = SchemaRetriever(TABLE_CHUNKS, EMBEDDING_MODEL_NAME)
+    # Load SQL generation model
+    app.state.sql_model, app.state.sql_tokenizer = load_sql_model_and_tokenizer(app.state.device)
+    app.state.loop = asyncio.get_event_loop()
+    logger.info("🚀 RAG system and both models loaded successfully!")
 
 # --- Models ---
 class User(BaseModel):
@@ -637,7 +655,7 @@ async def generate_sql(request: SQLGenerationRequest, current_user: dict = Depen
         # CHANGE THIS LINE - Use asyncio.get_event_loop() instead of app.state.loop
         loop = asyncio.get_event_loop()
         sql_query, retrieved_table_names, sql_generation_time = await loop.run_in_executor(
-            executor, generate_sql_with_rag, 
+            executor, generate_sql_with_rag_session, 
             request.question, retriever, schema_info, request.top_k
         )
         
