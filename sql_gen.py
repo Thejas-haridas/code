@@ -538,7 +538,7 @@ def create_session_directory(session_id: str) -> str:
     return session_dir
 
 @app.post("/setup-schema", response_model=SchemaSetupResponse)
-async def setup_schema(request: SchemaSetupRequest):
+async def setup_schema(request: SchemaSetupRequest,current_user: dict = Depends(get_current_active_user)):
     """
     First API: Setup schema with tables, descriptions, columns, keywords and join conditions
     Creates embeddings and stores them in session-specific folder
@@ -596,7 +596,7 @@ async def setup_schema(request: SchemaSetupRequest):
         raise HTTPException(status_code=500, detail=f"Schema setup failed: {str(e)}")
 
 @app.post("/generate-sql")
-async def generate_sql(request: SQLGenerationRequest):
+async def generate_sql(request: SQLGenerationRequest,current_user: dict = Depends(get_current_active_user)):
     """
     Second API: Generate SQL query from user question using stored schema and embeddings
     """
