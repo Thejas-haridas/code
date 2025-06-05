@@ -143,33 +143,33 @@ class SchemaRetriever:
             return True
         return False
     
-def retrieve_relevant_tables(self, question: str, top_k: int = 3) -> tuple:
-    """Retrieve top-k most relevant tables for the given question."""
-    retrieval_start_time = time.time()
-    
-    if self.embeddings is None:
-        if not self.load_embeddings():
-            self.create_embeddings()
-    if self.embedding_model is None:
-        self.load_embedding_model()
-    
-    # Create embedding for the question
-    question_embedding = self.embedding_model.encode([question])
-    
-    # Calculate cosine similarities
-    similarities = cosine_similarity(question_embedding, self.embeddings)[0]
-    
-    # Get top-k indices
-    top_indices = np.argsort(similarities)[::-1][:top_k]
-    
-    # Return relevant table chunks
-    relevant_tables = [self.table_chunks[i] for i in top_indices]
-    
-    retrieval_time = time.time() - retrieval_start_time
-    
-    logger.info(f"Retrieved {len(relevant_tables)} relevant tables: {[t['table'] for t in relevant_tables]} in {retrieval_time:.4f}s")
-    
-    return relevant_tables, retrieval_time
+    def retrieve_relevant_tables(self, question: str, top_k: int = 3) -> tuple:
+        """Retrieve top-k most relevant tables for the given question."""
+        retrieval_start_time = time.time()
+        
+        if self.embeddings is None:
+            if not self.load_embeddings():
+                self.create_embeddings()
+        if self.embedding_model is None:
+            self.load_embedding_model()
+        
+        # Create embedding for the question
+        question_embedding = self.embedding_model.encode([question])
+        
+        # Calculate cosine similarities
+        similarities = cosine_similarity(question_embedding, self.embeddings)[0]
+        
+        # Get top-k indices
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+        
+        # Return relevant table chunks
+        relevant_tables = [self.table_chunks[i] for i in top_indices]
+        
+        retrieval_time = time.time() - retrieval_start_time
+        
+        logger.info(f"Retrieved {len(relevant_tables)} relevant tables: {[t['table'] for t in relevant_tables]} in {retrieval_time:.4f}s")
+        
+        return relevant_tables, retrieval_time
 
 def construct_rag_prompt_with_rules(question: str, relevant_tables: List[Dict], join_conditions: str, database_rules: str) -> str:
     """Creates a structured prompt using retrieved schema elements and database-specific rules."""
