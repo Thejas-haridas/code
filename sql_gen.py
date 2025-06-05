@@ -604,34 +604,35 @@ async def generate_sql(request: SQLGenerationRequest):
         session_dir = os.path.join("sessions", request.session_id)
         if not os.path.exists(session_dir):
             raise HTTPException(status_code=404, detail=f"Session {request.session_id} not found")
-        
-        
+
         # Create SchemaRetriever instance
         retriever = SchemaRetriever(
             table_chunks=schema_info["table_chunks"],
             embedding_model_name=EMBEDDING_MODEL_NAME,
             session_dir=session_dir
         )
-        
+
         # Load existing embeddings
         if not retriever.load_embeddings():
             raise HTTPException(status_code=500, detail="Failed to load embeddings")
-        
+
         # Generate SQL using existing function
         sql_query, retrieved_table_names, sql_generation_time = await app.state.loop.run_in_executor(
             executor, generate_sql_with_rag_session, 
             request.question, retriever
         )
-        
-    return {
-           "question": request.question,
-           "retrieved_tables": retrieved_tables,
-           "generated_sql": sql_query,
-           "generation_time": round(generation_time, 2)
-       }
-   except Exception as e:
-       logger.error(f"SQL generation error: {e}")
-       raise HTTPException(status_code=500, detail=f"SQL generation failed: {str(e)}")
+
+        return {
+            "question": request.question,
+            "retrieved_tables": retrieved_table_names,
+            "generated_sql": sql_query,
+            "generation_time": round(sql_generation_time, 2)
+        }
+
+    except Exception as e:
+        logger.error(f"SQL generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"SQL generation failed: {str(e)}")
+
         
 
 
