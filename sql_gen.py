@@ -20,6 +20,7 @@ from jose import JWTError, jwt
 from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 import socket
+import pyodbc
 
 # JWT settings
 SECRET_KEY = "your-secret-key"  # Replace with a strong key
