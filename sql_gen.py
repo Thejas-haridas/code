@@ -492,7 +492,14 @@ class SQLGenerationRequest(BaseModel):
     session_id: str
     question: str
 
-
+class SQLGenerationResponse(BaseModel):
+    success: bool
+    question: str
+    retrieved_tables: List[str]
+    generated_sql: str
+    retrieval_time: float
+    sql_generation_time: float
+    
 def create_table_chunks_from_input(tables: List[TableSchema]) -> List[Dict]:
     """Convert input table schemas to TABLE_CHUNKS format"""
     table_chunks = []
@@ -596,8 +603,8 @@ async def setup_schema(request: SchemaSetupRequest,current_user: dict = Depends(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Schema setup failed: {str(e)}")
 
-@app.post("/generate-sql")
-async def generate_sql(request: SQLGenerationRequest,current_user: dict = Depends(get_current_active_user)):
+@app.post("/generate-sql", response_model=SQLGenerationResponse)
+async def generate_sql(request: SQLGenerationRequest):
     """
     Second API: Generate SQL query from user question using stored schema and embeddings
     """
@@ -606,33 +613,47 @@ async def generate_sql(request: SQLGenerationRequest,current_user: dict = Depend
         session_dir = os.path.join("sessions", request.session_id)
         if not os.path.exists(session_dir):
             raise HTTPException(status_code=404, detail=f"Session {request.session_id} not found")
-
+        
+        # Load schema information
+        schema_file = os.path.join(session_dir, "schema_info.json")
+        if not os.path.exists(schema_file):
+            raise HTTPException(status_code=404, detail=f"Schema information not found for session {request.session_id}")
+        
+        with open(schema_file, 'r') as f:
+            schema_info = json.load(f)
+        
         # Create SchemaRetriever instance
         retriever = SchemaRetriever(
             table_chunks=schema_info["table_chunks"],
             embedding_model_name=EMBEDDING_MODEL_NAME,
             session_dir=session_dir
         )
-
+        
         # Load existing embeddings
         if not retriever.load_embeddings():
             raise HTTPException(status_code=500, detail="Failed to load embeddings")
-
+        
         # Generate SQL using existing function
         sql_query, retrieved_table_names, sql_generation_time = await app.state.loop.run_in_executor(
             executor, generate_sql_with_rag_session, 
-            request.question, retriever
+            request.question, retriever, schema_info, request.top_k
         )
-
-        return {
-            "question": request.question,
-            "retrieved_tables": retrieved_table_names,
-            "generated_sql": sql_query,
-            "generation_time": round(sql_generation_time, 2)
-        }
-
+        
+        if not sql_query:
+            raise HTTPException(status_code=400, detail="Failed to generate SQL query")
+        
+        return SQLGenerationResponse(
+            success=True,
+            question=request.question,
+            retrieved_tables=retrieved_table_names,
+            generated_sql=sql_query,
+            retrieval_time=0.0,  # Will be calculated in generate_sql_with_rag_session
+            sql_generation_time=sql_generation_time
+        )
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"SQL generation error: {e}")
         raise HTTPException(status_code=500, detail=f"SQL generation failed: {str(e)}")
 
         
