@@ -11,11 +11,23 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Tuple, Dict, Any, List , Optional , Union
 from sklearn.metrics.pairwise import cosine_similarity
 from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordBearer ,OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
 import requests
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, AutoModel
 import uuid
+from jose import JWTError, jwt
+from datetime import datetime, timedelta, timezone
+from passlib.context import CryptContext
+import socket
+
+# JWT settings
+SECRET_KEY = "your-secret-key"  # Replace with a strong key
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+# Alias for code compatibility
+DATA_TO_CREATE_TOKEN = SECRET_KEY
 
 
 # --- 1. Configuration ---
@@ -194,286 +206,261 @@ Generate a SQL query that answers the following question using only the provided
 """
     return prompt
 
-def generate_sql_with_rag_session(question: str, retriever: SchemaRetriever, schema_info: Dict, top_k: int = 3) -> tuple:
-    """Generate SQL query using RAG approach with session-specific schema information."""
+def extract_sql_from_response(response: str) -> str:
+    """Extracts SQL code from the model's response with improved T-SQL parsing."""
+    # First try to find SQL in code blocks
+    if "```sql" in response:
+        start = response.find("```sql") + 6
+        end = response.find("```", start)
+        if end != -1:
+            sql_query = response[start:end].strip()
+            return clean_tsql_query(sql_query)
+    # Try to find SQL after "T-SQL Query" or similar markers
+    markers = ["### T-SQL Query", "T-SQL Query:", "Query:", "SELECT", "WITH", "INSERT", "UPDATE", "DELETE"]
+    for marker in markers:
+        if marker in response:
+            start = response.find(marker)
+            if marker in ["SELECT", "WITH", "INSERT", "UPDATE", "DELETE"]:
+                # For SQL keywords, include them in the result
+                sql_part = response[start:]
+            else:
+                # For other markers, skip the marker itself
+                sql_part = response[start + len(marker):]
+            # Extract until we hit a non-SQL line or end
+            lines = sql_part.split('\n')
+            sql_lines = []
+            for line in lines:
+                cleaned_line = line.strip()
+                if not cleaned_line:
+                    continue
+                if cleaned_line.startswith('#') or cleaned_line.startswith('--'):
+                    continue
+                if any(keyword in cleaned_line.upper() for keyword in ['SELECT', 'FROM', 'WHERE', 'JOIN', 'GROUP BY', 'ORDER BY', 'HAVING', 'WITH', 'INSERT', 'UPDATE', 'DELETE']) or sql_lines:
+                    sql_lines.append(line.rstrip())
+                elif sql_lines:
+                    # Stop if we've started collecting SQL and hit a non-SQL line
+                    break
+            if sql_lines:
+                return clean_tsql_query('\n'.join(sql_lines))
+    # Fallback: return the response as-is if no SQL structure found
+    return clean_tsql_query(response.strip())
+
+def clean_tsql_query(sql_query: str) -> str:
+    """Clean and validate T-SQL query for common issues."""
+    if not sql_query:
+        return sql_query
+    # Remove common non-T-SQL patterns and fix them
+    lines = sql_query.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        line = line.rstrip()
+        if not line.strip():
+            cleaned_lines.append(line)
+            continue
+        # Skip comment lines but keep SQL comments
+        if line.strip().startswith('#'):
+            continue
+        # Fix common non-T-SQL patterns
+        line_upper = line.upper()
+        # Replace LIMIT with TOP (basic pattern)
+        if 'LIMIT ' in line_upper and 'SELECT' in line_upper:
+            # This is a simple replacement - more complex logic might be needed
+            line = line.replace('LIMIT ', '-- LIMIT converted to TOP: ')
+        # Remove NULLS FIRST/LAST
+        if 'NULLS FIRST' in line_upper or 'NULLS LAST' in line_upper:
+            line = line.replace('NULLS FIRST', '').replace('NULLS LAST', '')
+            line = line.replace('nulls first', '').replace('nulls last', '')
+        cleaned_lines.append(line)
+    result = '\n'.join(cleaned_lines).strip()
+    # Final cleanup - remove trailing semicolons if multiple exist
+    while result.endswith(';;'):
+        result = result[:-1]
+    return result
+
+def generate_sql_with_rag(question: str, retriever: SchemaRetriever) -> Tuple[str, List[str], float]:
+    """Generates SQL query using RAG approach with schema retrieval."""
     start_time = time.time()
-    
     # Retrieve relevant tables
-    relevant_tables = retriever.retrieve_relevant_tables(question, top_k=top_k)
+    relevant_tables = retriever.retrieve_relevant_tables(question, top_k=3)
     retrieved_table_names = [table['table'] for table in relevant_tables]
-    
-    # Construct prompt with retrieved schema and database-specific rules
-    prompt = construct_rag_prompt_with_rules(
-        question, 
-        relevant_tables, 
-        schema_info["join_conditions"], 
-        schema_info["database_rules"]
-    )
-    
-    # Generate SQL using existing function (you'll provide this)
+    # Construct prompt with retrieved schema
+    prompt = construct_rag_prompt(question, relevant_tables)
+    # Generate SQL
     response = generate_text_optimized(prompt, app.state.sql_model, app.state.sql_tokenizer, max_new_tokens=300)
     sql_query = extract_sql_from_response(response)
-    
     generation_time = time.time() - start_time
-    
+    logger.info(f"SQL generated with RAG in {generation_time:.2f}s using tables: {retrieved_table_names}")
     return sql_query, retrieved_table_names, generation_time
 
-#--- create access token api -------
+
+# Configuration
+SECRET_KEY = "your-super-secret-key-change-this-in-production"  # Change this!
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+# Database configuration
+DATABASE_CONFIG = {
+    "server": "tcp:sqldb-dash-test.database.windows.net,1433",
+    "database": "sqldw",
+    "username": "admintest",
+    "password": "X4$wDv!cTyR",
+    "driver": "{ODBC Driver 17 for SQL Server}",
+    "timeout": 30
+}
+
+# Models
+class User(BaseModel):
+    username: str
+    password: str
+    disabled: bool = False
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    username: str | None = None
+
+# Security
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    """
-    This function is used to get the current active user.
 
-    Parameters:
-    - token (str): The token provided by the user for authentication.
-
-    Returns:
-    - User: The current active user object.
-
-    Raises:
-    - HTTPException: If the token is not valid or the user does not exist.
-    """
-
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
+def get_db_connection():
+    conn_str = (
+        f"DRIVER={DATABASE_CONFIG['driver']};"
+        f"SERVER={DATABASE_CONFIG['server']};"
+        f"DATABASE={DATABASE_CONFIG['database']};"
+        f"UID={DATABASE_CONFIG['username']};"
+        f"PWD={DATABASE_CONFIG['password']}"
     )
     try:
-        payload = jwt.decode(token, DATA_TO_CREATE_TOKEN, algorithms=[ALGORITHM])
-        print("token ++++++++++++++++++++++++++++++++++++++++++++++++",token)
-        k_id: str = payload.get("kid")
-        uuid: str = payload.get("uuid")
-        expires = payload.get("exp")
-        if k_id is None:
-            raise credentials_exception
-        token_data = TokenData(username=k_id, expires=expires, uuid=uuid)
-    except JWTError:
-        raise credentials_exception
-    user = {"username":"", "password":"","disabled":False}
-    # user = get_user(username=token_data.username)
-    # if user is None:
-        # raise credentials_exception
-    print(payload,"_____________________________________________-")
+        return pyodbc.connect(conn_str, timeout=DATABASE_CONFIG['timeout'])
+    except pyodbc.Error as e:
+        print(f"Database connection error: {e}")
+        raise
+
+def get_user(username: str):
+    """Get user from database"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT username, password, disabled FROM users WHERE username = ?", (username,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if row:
+            return {"username": row[0], "password": row[1], "disabled": bool(row[2])}
+        return None
+    except Exception as e:
+        print(f"Error getting user: {e}")
+        return None
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify password against hash"""
+    return pwd_context.verify(plain_password, hashed_password)
+
+def authenticate_user(username: str, password: str):
+    """Authenticate user with username and password"""
+    user = get_user(username)
+    if not user:
+        return False
+    if not verify_password(password, user['password']):
+        return False
     return user
 
-
-from fastapi import Depends, HTTPException
-
-
-async def get_current_active_user(current_user: User = Depends(get_current_user)):
-    """
-    Retrieve the currently active user.
-
-    This function checks if the current user is active. If the user is disabled,
-    it raises an HTTPException with a 400 status code and a message indicating
-    that the user is inactive.
-
-    Args:
-        current_user (User): The current user object, retrieved through the
-                             get_current_user dependency.
-
-    Raises:
-        HTTPException: If the user is disabled, this exception is raised with
-                       a 400 status code and a detail message.
-
-    Returns:
-        User: The current active user object if the user is not disabled.
-    """
-
-    # Log the current user for debugging purposes
-    print(f"current user: {current_user}")
-
-    # Check if the current user is disabled
-    # if current_user.get("disabled"):
-        # Raise an HTTP exception if the user is inactive
-        # raise HTTPException(status_code=400, detail="Inactive user")
-
-    # Return the current user if they are active
-    return current_user
-
-
-def create_access_token_util(data: dict, expires_delta: timedelta | None = None):
-    """
-     Function to create an access token.
-
-     Args:
-         data (dict): The data to be included in the token.
-         expires_delta (timedelta | None): The time delta indicating the
-         lifetime of the token. If not provided, the default token
-         expiry time will be used.
-
-     Returns:
-         str: The encoded JWT access token.
-     """
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    """Create JWT access token"""
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
         expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
     to_encode.update({"exp": expire})
-    print("toencode ++++================",to_encode)
-    encoded_jwt = jwt.encode(to_encode, DATA_TO_CREATE_TOKEN, algorithm=ALGORITHM)
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-
-from passlib.context import CryptContext
-
-# Initialize the password context for hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """
-    Verify a plain password against a hashed password.
-
-    This function uses the password context to check if the provided plain
-    password matches the hashed password. It returns True if the passwords
-    match, and False otherwise.
-
-    Args:
-        plain_password (str): The plain text password to verify.
-        hashed_password (str): The hashed password to compare against.
-
-    Returns:
-        bool: True if the plain password matches the hashed password,
-              False otherwise.
-    """
-
-    # Use the password context to verify the plain password against the hashed password
-    return pwd_context.verify(plain_password, hashed_password)
-
-
-def authenticate_user(username: str, password: str):
-    """
-    This function is used to authenticate the user.
-
-    Args:
-        username (str): The username of the user.
-        password (str): The password of the user.
-
-    Returns:
-        User | None: If the user is authenticated successfully, the function returns the User object. Otherwise, it returns None.
-
-    Raises:
-        ValueError: If the user is not found in the database.
-        ValueError: If the provided password does not match the password stored in the database for the given username.
-    """
-
-    user = get_user(username)
-    print("+++++++++++++++++++++++")
-    print(f"user authenticate user: {user}")
-    print("+++++++++++++++++++++++")
-    if not user:
-        return None
-    if not verify_password(password, user['password']):
-        return None
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    """Get current user from JWT token"""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username)
+    except JWTError:
+        raise credentials_exception
+    
+    user = get_user(username=token_data.username)
+    if user is None:
+        raise credentials_exception
     return user
 
+async def get_current_active_user(current_user: dict = Depends(get_current_user)):
+    """Get current active user"""
+    if current_user.get("disabled"):
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
 
-#############################-----------register--------------------------------###########################################
 @app.post("/register")
 async def register(user: User):
-    """
-    Register a new user in the system.
-
-    This endpoint allows for the registration of a new user. It first checks
-    if the username already exists. If it does, an HTTPException is raised.
-    If the username is available, the password is hashed and the user
-    information is inserted into the database.
-
-    Args:
-        user (User): The user object containing username, password, and
-                      disabled status.
-
-    Raises:
-        HTTPException: If the username already exists or if there is an
-                       error during the database insertion.
-
-    Returns:
-        dict: A message indicating successful registration.
-    """
-
-    # Check if the username already exists in the database
+    """Register a new user"""
+    # Check if user already exists
     existing_user = get_user(user.username)
     if existing_user:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already exists")
-
-    # Hash the password before storing it in the database
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Username already exists"
+        )
+    
+    # Hash password
     hashed_password = pwd_context.hash(user.password)
-
+    
     try:
-        # Attempt to insert the user document into the database
-        _ = collection_user.insert_one({"username": user.username,
-                                        "password": hashed_password,
-                                        "disabled": user.disabled})
-        print("Document inserted successfully.")
-    except socket.timeout:
-        # Handle socket timeout exceptions during the insert operation
-        print("Socket timeout: Insert operation took too long.")
-        raise HTTPException(status_code=503,
-                            detail={"error_code": "506", "message": "Socket timeout: Insert operation took too long."})
+        # Insert into SQL Server database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO users (username, password, disabled) VALUES (?, ?, ?)",
+            (user.username, hashed_password, user.disabled)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return {"message": "User registered successfully"}
     except Exception as e:
-        # Handle other exceptions and log the error
-        print(f"An error occurred: {e}")
-        raise HTTPException(status_code=503, detail={"error_code": "506", "message": f"An error occurred: {e}"})
+        print(f"Registration error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Registration failed"
+        )
 
-    # Return a success message upon successful registration
-    return {"message": "User registered successfully"}
-
-
-#######################################--------------create_access_token------------------#####################################
-@app.post("/create_access_token")
-async def login_for_access_token(
-        form_data: OAuth2PasswordRequestForm = Depends()
-) -> Token:
-    """
-    Generate an access token for a user after successful authentication.
-
-    This endpoint allows users to log in and obtain an access token.
-    It authenticates the user with the provided username and password.
-    If authentication is successful, a JWT access token is generated
-    and returned. If authentication fails, an HTTPException is raised.
-
-    Args:
-        form_data (OAuth2PasswordRequestForm): The form data containing
-                                                username and password.
-
-    Raises:
-        HTTPException: If the username or password is incorrect, a 401
-                       Unauthorized error is raised.
-
-    Returns:
-        Token: An object containing the access token and its type.
-    """
-
-    # Authenticate the user using the provided credentials
+@app.post("/token", response_model=Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    """Login and get access token"""
     user = authenticate_user(form_data.username, form_data.password)
-
-    # Log the user information for debugging purposes
-    print("+++++++++++++++++++++++++")
-    print(f"user login: {user}")
-    print("++++++++++++++++++++++++++")
-
-    # Raise an exception if the user could not be authenticated
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-    # Calculate the expiration time for the access token
+    
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-
-    # Create the access token with the user's username and expiration time
-    access_token = create_access_token_util(
-        data={"sub": user.get("username", "")},
+    access_token = create_access_token(
+        data={"sub": user["username"]}, 
         expires_delta=access_token_expires
     )
-
-    # Return the access token and its type
-    return Token(access_token=access_token, token_type="bearer")
+    
+    return {"access_token": access_token, "token_type": "bearer"}
 
 #----utility endpoints-----
 # Pydantic Models
@@ -502,15 +489,7 @@ class SchemaSetupResponse(BaseModel):
 class SQLGenerationRequest(BaseModel):
     session_id: str
     question: str
-    top_k: Optional[int] = 3
 
-class SQLGenerationResponse(BaseModel):
-    success: bool
-    question: str
-    retrieved_tables: List[str]
-    generated_sql: str
-    retrieval_time: float
-    sql_generation_time: float
 
 def create_table_chunks_from_input(tables: List[TableSchema]) -> List[Dict]:
     """Convert input table schemas to TABLE_CHUNKS format"""
@@ -615,7 +594,7 @@ async def setup_schema(request: SchemaSetupRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Schema setup failed: {str(e)}")
 
-@app.post("/generate-sql", response_model=SQLGenerationResponse)
+@app.post("/generate-sql")
 async def generate_sql(request: SQLGenerationRequest):
     """
     Second API: Generate SQL query from user question using stored schema and embeddings
@@ -626,13 +605,6 @@ async def generate_sql(request: SQLGenerationRequest):
         if not os.path.exists(session_dir):
             raise HTTPException(status_code=404, detail=f"Session {request.session_id} not found")
         
-        # Load schema information
-        schema_file = os.path.join(session_dir, "schema_info.json")
-        if not os.path.exists(schema_file):
-            raise HTTPException(status_code=404, detail=f"Schema information not found for session {request.session_id}")
-        
-        with open(schema_file, 'r') as f:
-            schema_info = json.load(f)
         
         # Create SchemaRetriever instance
         retriever = SchemaRetriever(
@@ -648,25 +620,19 @@ async def generate_sql(request: SQLGenerationRequest):
         # Generate SQL using existing function
         sql_query, retrieved_table_names, sql_generation_time = await app.state.loop.run_in_executor(
             executor, generate_sql_with_rag_session, 
-            request.question, retriever, schema_info, request.top_k
+            request.question, retriever
         )
         
-        if not sql_query:
-            raise HTTPException(status_code=400, detail="Failed to generate SQL query")
+       return {
+           "question": request.question,
+           "retrieved_tables": retrieved_tables,
+           "generated_sql": sql_query,
+           "generation_time": round(generation_time, 2)
+       }
+   except Exception as e:
+       logger.error(f"SQL generation error: {e}")
+       raise HTTPException(status_code=500, detail=f"SQL generation failed: {str(e)}")
         
-        return SQLGenerationResponse(
-            success=True,
-            question=request.question,
-            retrieved_tables=retrieved_table_names,
-            generated_sql=sql_query,
-            retrieval_time=0.0,  # Will be calculated in generate_sql_with_rag_session
-            sql_generation_time=sql_generation_time
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"SQL generation failed: {str(e)}")
 
 
 if __name__ == "__main__":
