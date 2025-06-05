@@ -366,6 +366,13 @@ def init_db():
     cursor.close()
     conn.close()
 
+def cleanup_memory():
+   """Aggressive memory cleanup."""
+   if torch.cuda.is_available():
+       torch.cuda.empty_cache()
+       torch.cuda.synchronize()
+   gc.collect()
+    
 @app.on_event("startup")
 async def startup_event():
     init_db()
