@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from typing import Tuple, Dict, Any, List , Optional , Union
 from sklearn.metrics.pairwise import cosine_similarity
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException , Depends
 from pydantic import BaseModel, Field
 import requests
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, AutoModel
