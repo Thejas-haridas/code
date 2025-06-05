@@ -42,7 +42,6 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Schema Management and SQL Generator", version="1.0.0")
 executor = ThreadPoolExecutor(max_workers=os.cpu_count() * 2)
-app.state.loop = asyncio.get_event_loop()
 
 # Hardcoded T-SQL Rules for different database servers
 DATABASE_RULES = {
@@ -606,7 +605,7 @@ async def setup_schema(request: SchemaSetupRequest,current_user: dict = Depends(
         raise HTTPException(status_code=500, detail=f"Schema setup failed: {str(e)}")
 
 @app.post("/generate-sql", response_model=SQLGenerationResponse)
-async def generate_sql(request: SQLGenerationRequest):
+async def generate_sql(request: SQLGenerationRequest, current_user: dict = Depends(get_current_active_user)):
     """
     Second API: Generate SQL query from user question using stored schema and embeddings
     """
@@ -635,8 +634,9 @@ async def generate_sql(request: SQLGenerationRequest):
         if not retriever.load_embeddings():
             raise HTTPException(status_code=500, detail="Failed to load embeddings")
         
-        # Generate SQL using existing function
-        sql_query, retrieved_table_names, sql_generation_time = await app.state.loop.run_in_executor(
+        # CHANGE THIS LINE - Use asyncio.get_event_loop() instead of app.state.loop
+        loop = asyncio.get_event_loop()
+        sql_query, retrieved_table_names, sql_generation_time = await loop.run_in_executor(
             executor, generate_sql_with_rag, 
             request.question, retriever, schema_info, request.top_k
         )
@@ -649,7 +649,7 @@ async def generate_sql(request: SQLGenerationRequest):
             question=request.question,
             retrieved_tables=retrieved_table_names,
             generated_sql=sql_query,
-            retrieval_time=0.0,  # Will be calculated in generate_sql_with_rag_session
+            retrieval_time=0.0,
             sql_generation_time=sql_generation_time
         )
         
