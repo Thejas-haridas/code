@@ -706,7 +706,7 @@ async def generate_sql(request: SQLGenerationRequest, current_user: dict = Depen
             question=request.question,
             retrieved_tables=retrieved_table_names,
             generated_sql=sql_query,
-            retrieval_time=0.0,
+            retrieval_time=0.000,
             sql_generation_time=sql_generation_time
         )
         
