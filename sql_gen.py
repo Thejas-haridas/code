@@ -336,16 +336,8 @@ def init_db():
     conn.close()
 
 @app.on_event("startup")
-async def startup_event():
+def startup_event():
     init_db()
-    """Load both models on application startup."""
-    app.state.device = setup_device()
-    # Initialize RAG retriever
-    app.state.retriever = SchemaRetriever(TABLE_CHUNKS, EMBEDDING_MODEL_NAME)
-    # Load SQL generation model
-    app.state.sql_model, app.state.sql_tokenizer = load_sql_model_and_tokenizer(app.state.device)
-    app.state.loop = asyncio.get_event_loop()
-    logger.info("🚀 RAG system and both models loaded successfully!")
 
 # --- Models ---
 class User(BaseModel):
