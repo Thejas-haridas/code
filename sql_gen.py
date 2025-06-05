@@ -369,7 +369,7 @@ def authenticate_user(username: str, password: str):
         return False
     return user
 
-def create_access_token(data: dict, expires_delta: timedelta | None = None):
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     """Create JWT access token"""
     to_encode = data.copy()
     if expires_delta:
