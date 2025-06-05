@@ -492,6 +492,7 @@ class SchemaSetupResponse(BaseModel):
 class SQLGenerationRequest(BaseModel):
     session_id: str
     question: str
+    top_k: Optional[int] = 3
 
 class SQLGenerationResponse(BaseModel):
     success: bool
